@@ -1,12 +1,11 @@
-import asyncio
 import base64
 from collections.abc import AsyncGenerator, AsyncIterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from time import monotonic
-from typing import Final, Self, TypedDict, Unpack, final
+from typing import Self, TypedDict, Unpack
 
-from boring_ssl2 import ClientContext as TLSClientContext
+from boring_ssl2 import ClientContext
 from ssl2 import (
     AsyncTransport,
     ClientHello,
@@ -17,7 +16,7 @@ from ssl2 import (
     ProxyError,
     ProxyScheme,
     SessionCache,
-    StreamTransport,
+    SocketTransport,
     TLSClientConfiguration,
     TLSError,
     TLSStream,
@@ -30,14 +29,14 @@ from boring_http.errors import (
     HTTPError,
     ProtocolError,
     RemoteDisconnected,
+    RevocationError,
     StreamRefused,
     TimeoutError,
     TooManyRedirects,
 )
 from boring_http.http1 import Http1Connection
-from boring_http.http2 import CHROME, Http2Connection, Http2Profile
-from boring_http.http3 import DEFAULT as HTTP3_DEFAULT
-from boring_http.http3 import Http3Connection, Http3Profile
+from boring_http.http2 import CHROME_HTTP2, Http2Connection, Http2Profile
+from boring_http.http3 import CHROME_HTTP3, Http3Connection, Http3Profile
 from boring_http.message import (
     URL,
     Body,
@@ -52,25 +51,25 @@ from boring_http.message import (
 )
 from boring_http.pool import Connection, Pool
 from boring_http.quic.protocol import OriginMemory, QuicClient
+from boring_http.revocation import Revocation, Revocations
 from boring_http.timing import Deadline, Timeout
 from boring_http.websocket import WebSocket
 
-IMPLEMENTED: Final = (HTTPVersion.HTTP_3, HTTPVersion.HTTP_2, HTTPVersion.HTTP_1)
-ALPN: Final = {
+IMPLEMENTED = (HTTPVersion.HTTP_3, HTTPVersion.HTTP_2, HTTPVersion.HTTP_1)
+ALPN = {
     HTTPVersion.HTTP_2: NextProtocol.H2,
     HTTPVersion.HTTP_1: NextProtocol.HTTP1,
 }
-ACCEPTED_ENCODINGS: Final = "gzip, deflate, br, zstd"
-USER_AGENT: Final = "boring-http"
-DEFAULT_TIMEOUT: Final = Timeout()
+ACCEPTED_ENCODINGS = "gzip, deflate, br, zstd"
+USER_AGENT = "boring-http"
+DEFAULT_TIMEOUT = Timeout()
 
 
-@final
 class Unset:
     pass
 
 
-UNSET: Final = Unset()
+UNSET = Unset()
 
 
 class RequestOptions(TypedDict, total=False):
@@ -87,7 +86,6 @@ class RequestOptions(TypedDict, total=False):
     proxy: Proxy | str | None | Unset
 
 
-@final
 class Client:
     def __init__(
         self,
@@ -96,14 +94,15 @@ class Client:
         timeout: float | Timeout | None = DEFAULT_TIMEOUT,
         proxy: Proxy | str | None = None,
         tls: ClientHello | None = None,
-        http2: Http2Profile = CHROME,
-        http3: Http3Profile = HTTP3_DEFAULT,
+        http2: Http2Profile = CHROME_HTTP2,
+        http3: Http3Profile = CHROME_HTTP3,
         versions: Sequence[HTTPVersion | str] = (
             HTTPVersion.HTTP_2,
             HTTPVersion.HTTP_1,
         ),
         trust_store: TrustStore | None = None,
         verify: bool = True,
+        revocation: Revocation = Revocation.SOFT,
         cookies: CookieJar | None = None,
         base_url: str | None = None,
         max_connections: int = 100,
@@ -122,11 +121,12 @@ class Client:
         self._versions = tuple(HTTPVersion(version) for version in versions)
         self._trust_store = trust_store
         self._verify = verify
+        self._revocations = Revocations(revocation, self._fetch_crl)
         self._base_url = base_url
         self._max_redirects = max_redirects
         self._max_message_size = max_message_size
         self._decode = decode
-        self._contexts: dict[tuple[NextProtocol, ...] | None, TLSClientContext] = {}
+        self._contexts: dict[tuple[NextProtocol, ...] | None, ClientContext] = {}
         self._memory: dict[tuple[str, int], OriginMemory] = {}
         self._pool = Pool(self._connect, max_connections, max_connections_per_host)
         self.cookies = CookieJar() if cookies is None else cookies
@@ -230,7 +230,11 @@ class Client:
         if params is not None:
             target = target.with_params(params)
         body = self._body(json, data, content, files)
-        merged = self._headers.merged(Headers(headers))
+        merged = (
+            self._headers.copy()
+            if headers is None
+            else self._headers.merged(Headers(headers))
+        )
         if (
             body is not None
             and body.content_type is not None
@@ -280,7 +284,7 @@ class Client:
                 response.history = tuple(history)
                 if not stream:
                     try:
-                        _ = await response.read()
+                        await response.read()
                     except BaseException:
                         await response.close()
                         raise
@@ -290,7 +294,7 @@ class Client:
                 raise TooManyRedirects(
                     f"more than {self._max_redirects} redirects from {history[0].url if history else request.url}"
                 )
-            _ = await response.read()
+            await response.read()
             history.append(response)
             request = self._redirect(request, response)
 
@@ -350,7 +354,7 @@ class Client:
             )
             self.cookies.store(response.cookies)
             if response.status != 101:
-                _ = await response.read()
+                await response.read()
                 raise ProtocolError(
                     f"websocket handshake answered {response.status} {response.reason}: {response.text[:200]}"
                 )
@@ -410,7 +414,7 @@ class Client:
 
     def _context(
         self, protocols: tuple[NextProtocol, ...] | None = None
-    ) -> TLSClientContext:
+    ) -> ClientContext:
         if protocols not in self._contexts:
             hello = (
                 self._http3.tls
@@ -437,7 +441,7 @@ class Client:
                 if hello is None or hello.offers(ExtensionType.pre_shared_key)
                 else None
             )
-            self._contexts[protocols] = TLSClientContext(
+            self._contexts[protocols] = ClientContext(
                 configuration, session_cache=cache
             )
         return self._contexts[protocols]
@@ -456,6 +460,19 @@ class Client:
                 name for name in self._tls.application_settings if name in names
             ),
         )
+
+    async def _checked(self, stream: TLSStream, authority: str) -> None:
+        try:
+            await self._revocations.check(stream.buffer.getpeerchain(), authority)
+        except RevocationError:
+            await stream.close()
+            raise
+
+    async def _fetch_crl(self, url: str) -> bytes:
+        async with Client(
+            versions=(HTTPVersion.HTTP_1,), revocation=Revocation.NONE, timeout=10
+        ) as inner:
+            return (await inner.get(url)).body
 
     async def _connect(
         self,
@@ -477,6 +494,13 @@ class Client:
                     proxy=proxy,
                     memory=memory,
                 )
+                try:
+                    await self._revocations.check(
+                        client.connection.peer_chain, url.authority
+                    )
+                except RevocationError:
+                    client.close()
+                    raise
                 connection = Http3Connection(client, self._http3, memory)
                 await connection.start()
                 return connection
@@ -486,6 +510,7 @@ class Client:
                     url.address,
                     proxy=proxy,
                 )
+                await self._checked(stream, url.authority)
                 if stream.negotiated_protocol() is NextProtocol.H2:
                     connection = Http2Connection(stream, self._http2)
                     await connection.start()
@@ -497,13 +522,13 @@ class Client:
             ):
                 transport: AsyncTransport
                 if proxy.scheme is ProxyScheme.HTTPS:
-                    transport = await TLSStream.connect(
+                    secured = await TLSStream.connect(
                         self._context(), (proxy.host, proxy.port)
                     )
+                    await self._checked(secured, f"{proxy.host}:{proxy.port}")
+                    transport = secured
                 else:
-                    transport = StreamTransport(
-                        *await asyncio.open_connection(proxy.host, proxy.port)
-                    )
+                    transport = await SocketTransport.connect((proxy.host, proxy.port))
                 authorization = None
                 if proxy.credentials is not None:
                     authorization = "Basic " + base64.b64encode(
@@ -512,11 +537,9 @@ class Client:
                 return Http1Connection(
                     transport, absolute_form=True, proxy_authorization=authorization
                 )
-            transport, leftover = await TLSStream.tunnel(
-                self._context(), url.address, proxy
-            )
-            return Http1Connection(transport, leftover=leftover)
-        except ProxyError, ConfigurationError:
+            tunnel = await TLSStream.tunnel(self._context(), url.address, proxy)
+            return Http1Connection(tunnel.transport, leftover=tunnel.leftover)
+        except ProxyError, ConfigurationError, RevocationError:
             raise
         except TLSError as error:
             raise ConnectError(
@@ -537,7 +560,7 @@ class Client:
             except ConnectError, TimeoutError:
                 if quic and self._versions != (HTTPVersion.HTTP_3,):
                     # the learned HTTP/3 route is unreachable, so this origin goes back to TCP
-                    _ = self._alt_svc.pop(request.url.address, None)
+                    self._alt_svc.pop(request.url.address, None)
                     quic = False
                     continue
                 raise

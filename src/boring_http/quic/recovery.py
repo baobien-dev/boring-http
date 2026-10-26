@@ -1,23 +1,21 @@
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Final, final
 
 from boring_http.quic.packet import Ack, Frame
 
-INITIAL_RTT: Final = 0.333
-PACKET_THRESHOLD: Final = 3
-TIME_THRESHOLD: Final = 9 / 8
-GRANULARITY: Final = 0.001
-MINIMUM_WINDOW_PACKETS: Final = 2
-INITIAL_WINDOW_PACKETS: Final = 10
-LOSS_REDUCTION: Final = 0.5
-PERSISTENT_CONGESTION_THRESHOLD: Final = 3
-MAXIMUM_WINDOW: Final = 16 << 20
-MAX_RANGES: Final = 32
-TRACKED_ACK_ONLY: Final = 256
+INITIAL_RTT = 0.333
+PACKET_THRESHOLD = 3
+TIME_THRESHOLD = 9 / 8
+GRANULARITY = 0.001
+MINIMUM_WINDOW_PACKETS = 2
+INITIAL_WINDOW_PACKETS = 10
+LOSS_REDUCTION = 0.5
+PERSISTENT_CONGESTION_THRESHOLD = 3
+MAXIMUM_WINDOW = 16 << 20
+MAX_RANGES = 32
+TRACKED_ACK_ONLY = 256
 
 
-@final
 @dataclass(slots=True)
 class SentPacket:
     number: int
@@ -27,9 +25,9 @@ class SentPacket:
     size: int
     frames: tuple[Frame, ...]
     early: bool = False
+    mtu_probe: bool = False
 
 
-@final
 @dataclass(slots=True)
 class PacketSpace:
     sent: dict[int, SentPacket] = field(default_factory=dict[int, SentPacket])
@@ -49,7 +47,14 @@ class PacketSpace:
         if self.largest_received is None or number > self.largest_received:
             self.largest_received = number
             self.largest_received_time = now
-        for index, (low, high) in enumerate(self.received):
+        if ack_eliciting:
+            self.ack_eliciting_received += 1
+        received = self.received
+        if in_order and received:
+            # the usual case: the next number extends the newest range, nothing to merge or sort
+            received[-1] = (received[-1][0], number)
+            return True
+        for index, (low, high) in enumerate(received):
             if low <= number <= high:
                 break
             if number == high + 1:
@@ -66,8 +71,6 @@ class PacketSpace:
         # a peer that never acknowledges our ACK-only packets would otherwise make this list grow without end
         if len(self.received) > MAX_RANGES:
             del self.received[: len(self.received) - MAX_RANGES]
-        if ack_eliciting:
-            self.ack_eliciting_received += 1
         return in_order
 
     def encode_number(self, number: int) -> bytes:
@@ -114,7 +117,6 @@ class PacketSpace:
         self.received = merged
 
 
-@final
 class Recovery:
     def __init__(self, max_datagram_size: int) -> None:
         self._max_datagram = max_datagram_size
@@ -133,7 +135,10 @@ class Recovery:
         self.handshake_confirmed = False
 
     def space(self, level: int) -> PacketSpace:
-        return self.spaces.setdefault(level, PacketSpace())
+        space = self.spaces.get(level)
+        if space is None:
+            space = self.spaces[level] = PacketSpace()
+        return space
 
     def on_packet_sent(self, level: int, packet: SentPacket) -> None:
         space = self.space(level)
@@ -145,7 +150,7 @@ class Recovery:
             return
         space.ack_only.append(packet.number)
         if len(space.ack_only) > TRACKED_ACK_ONLY:
-            _ = space.sent.pop(space.ack_only.popleft(), None)
+            space.sent.pop(space.ack_only.popleft(), None)
 
     def on_ack_received(
         self, level: int, ack: Ack, now: float, ack_delay_exponent: int
@@ -208,7 +213,9 @@ class Recovery:
             del space.sent[packet.number]
             if packet.in_flight:
                 self.bytes_in_flight -= packet.size
-                in_flight.append(packet)
+                # RFC 9000 section 14.4: a lost PMTU probe says the path is narrow, not that it is congested
+                if not packet.mtu_probe:
+                    in_flight.append(packet)
         if in_flight:
             self._on_packets_lost(in_flight, now)
         return in_flight

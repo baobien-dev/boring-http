@@ -1,23 +1,21 @@
 from collections.abc import Iterable
-from typing import Final, final
 
 from boring_http.errors import ProtocolError
 from boring_http.hpack_tables import HUFFMAN_CODES, STATIC_TABLE
 
-NEVER_INDEXED: Final = frozenset({b"authorization", b"proxy-authorization"})
-ENTRY_OVERHEAD: Final = 32
-DEFAULT_CAPACITY: Final = 4096
-EOS: Final = 256
-DECODE_TABLE: Final = {
+NEVER_INDEXED = frozenset({b"authorization", b"proxy-authorization"})
+ENTRY_OVERHEAD = 32
+DEFAULT_CAPACITY = 4096
+EOS = 256
+DECODE_TABLE = {
     (length, code): symbol for symbol, (code, length) in enumerate(HUFFMAN_CODES)
 }
-STATIC_PAIRS: Final = {pair: index for index, pair in enumerate(STATIC_TABLE, 1)}
-STATIC_NAMES: Final = {
+STATIC_PAIRS = {pair: index for index, pair in enumerate(STATIC_TABLE, 1)}
+STATIC_NAMES = {
     name: index for index, (name, _) in reversed(list(enumerate(STATIC_TABLE, 1)))
 }
 
 
-@final
 class BlockWriter:
     def __init__(self) -> None:
         self._data = bytearray()
@@ -63,7 +61,6 @@ class BlockWriter:
         return bytes(out)
 
 
-@final
 class BlockReader:
     def __init__(self, data: bytes) -> None:
         self._data = data
@@ -128,7 +125,6 @@ class BlockReader:
         return bytes(out)
 
 
-@final
 class Encoder:
     def __init__(self) -> None:
         self._table: list[tuple[bytes, bytes]] = []
@@ -187,7 +183,6 @@ class Encoder:
             self._size -= len(name) + len(value) + ENTRY_OVERHEAD
 
 
-@final
 class Decoder:
     def __init__(self, capacity: int, max_header_list_size: int) -> None:
         self._table: list[tuple[bytes, bytes]] = []

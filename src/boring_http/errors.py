@@ -9,6 +9,10 @@ class ConnectError(HTTPError):
     pass
 
 
+class RevocationError(ConnectError):
+    pass
+
+
 class RemoteDisconnected(ConnectError):
     pass
 

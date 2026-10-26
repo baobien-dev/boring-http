@@ -1,14 +1,12 @@
 import zlib
 from collections.abc import Callable, Sequence
 from compression import zstd
-from typing import final
 
 from boring_ssl2 import BrotliDecoder
 
 from boring_http.errors import ProtocolError
 
 
-@final
 class ContentDecoder:
     def __init__(self, codings: Sequence[str]) -> None:
         self._codings = tuple(reversed(codings))

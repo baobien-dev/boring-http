@@ -1,10 +1,7 @@
-from typing import final
-
 from boring_http.errors import ProtocolError
 from boring_http.quic.packet import Stream
 
 
-@final
 class SendStream:
     def __init__(self, stream_id: int, max_data: int) -> None:
         self.stream_id = stream_id
@@ -88,36 +85,21 @@ class SendStream:
         return None
 
 
-@final
 class ReceiveStream:
     def __init__(self, stream_id: int, max_data: int) -> None:
         self.stream_id = stream_id
         self.max_data = max_data
         self.consumed = 0
-        self.ready = bytearray()
+        # in-order data the application has not been handed yet
+        self.chunks: list[bytes] = []
         self.fragments: dict[int, bytes] = {}
         self.next_offset = 0
         self.final_size: int | None = None
         self.reset_error: int | None = None
         self.stop_sent = False
 
-    @property
-    def finished(self) -> bool:
-        return (
-            self.final_size is not None
-            and self.next_offset == self.final_size
-            and not self.ready
-        )
-
-    @property
-    def readable(self) -> bool:
-        return (
-            bool(self.ready)
-            or self.final_size == self.next_offset
-            or self.reset_error is not None
-        )
-
-    def on_frame(self, frame: Stream) -> int:
+    def on_frame(self, frame: Stream) -> bytes:
+        # returns what the frame makes readable in order; a frame that arrives in order passes its bytes on as they are
         end = frame.offset + len(frame.data)
         if frame.fin:
             if self.final_size is not None and self.final_size != end:
@@ -130,25 +112,27 @@ class ReceiveStream:
                 f"stream {self.stream_id} exceeded its flow control limit"
             )
         if end <= self.next_offset:
-            return 0
+            return b""
         if frame.offset > self.next_offset:
             self.fragments[frame.offset] = frame.data
-            return 0
-        self.ready += frame.data[self.next_offset - frame.offset :]
+            return b""
+        data = (
+            frame.data
+            if frame.offset == self.next_offset
+            else frame.data[self.next_offset - frame.offset :]
+        )
         self.next_offset = end
-        while (fragment := self.fragments.pop(self.next_offset, None)) is not None:
-            self.ready += fragment
-            self.next_offset += len(fragment)
-        for offset in sorted(self.fragments):
-            if offset < self.next_offset:
-                fragment = self.fragments.pop(offset)
-                if offset + len(fragment) > self.next_offset:
-                    self.ready += fragment[self.next_offset - offset :]
-                    self.next_offset = offset + len(fragment)
-        return self.next_offset
-
-    def read(self) -> bytes:
-        data = bytes(self.ready)
-        self.ready = bytearray()
+        if self.fragments:
+            pieces = [data]
+            while (fragment := self.fragments.pop(self.next_offset, None)) is not None:
+                pieces.append(fragment)
+                self.next_offset += len(fragment)
+            for offset in sorted(self.fragments):
+                if offset < self.next_offset:
+                    fragment = self.fragments.pop(offset)
+                    if offset + len(fragment) > self.next_offset:
+                        pieces.append(fragment[self.next_offset - offset :])
+                        self.next_offset = offset + len(fragment)
+            data = b"".join(pieces)
         self.consumed += len(data)
         return data

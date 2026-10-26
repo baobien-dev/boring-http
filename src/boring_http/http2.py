@@ -3,7 +3,6 @@ import struct
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from enum import IntEnum, IntFlag
-from typing import Final, final
 
 from ssl2 import (
     AkamaiFingerprint,
@@ -24,11 +23,12 @@ from boring_http.hpack import Decoder, Encoder
 from boring_http.message import Headers, HTTPVersion, Request, Response
 from boring_http.timing import Deadline
 
-PREFACE: Final = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
-DEFAULT_WINDOW: Final = 65535
-DEFAULT_FRAME_SIZE: Final = 16384
-DEFAULT_TABLE_SIZE: Final = 4096
-DEFAULT_HEADER_LIST_SIZE: Final = 262144
+PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+DEFAULT_WINDOW = 65535
+DEFAULT_FRAME_SIZE = 16384
+DEFAULT_TABLE_SIZE = 4096
+DEFAULT_HEADER_LIST_SIZE = 262144
+DATA_BATCH = 1 << 20
 
 
 class FrameType(IntEnum):
@@ -53,11 +53,11 @@ class Flag(IntFlag):
 
 
 # plain integers for the frame reader: an IntFlag operand routes every `&` through Python-level enum code
-END_STREAM: Final = Flag.END_STREAM.value
-ACK: Final = Flag.ACK.value
-END_HEADERS: Final = Flag.END_HEADERS.value
-PADDED: Final = Flag.PADDED.value
-PRIORITY: Final = Flag.PRIORITY.value
+END_STREAM = Flag.END_STREAM.value
+ACK = Flag.ACK.value
+END_HEADERS = Flag.END_HEADERS.value
+PADDED = Flag.PADDED.value
+PRIORITY = Flag.PRIORITY.value
 
 
 class ErrorCode(IntEnum):
@@ -77,7 +77,6 @@ class ErrorCode(IntEnum):
     HTTP_1_1_REQUIRED = 0xD
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class Http2Profile:
     fingerprint: AkamaiFingerprint
@@ -94,7 +93,7 @@ class Http2Profile:
         )
 
 
-CHROME: Final = Http2Profile(
+CHROME_HTTP2 = Http2Profile(
     AkamaiFingerprint(
         settings=(
             Http2Setting(Http2SettingIdentifier.HEADER_TABLE_SIZE, 65536),
@@ -117,7 +116,6 @@ CHROME: Final = Http2Profile(
 )
 
 
-@final
 class Http2Stream:
     def __init__(self, identifier: int, send_window: int) -> None:
         self.identifier = identifier
@@ -126,7 +124,7 @@ class Http2Stream:
         self.headers: asyncio.Future[tuple[int, Headers]] = (
             asyncio.get_running_loop().create_future()
         )
-        self.data = bytearray()
+        self.chunks: list[bytes] = []
         self.error: BaseException | None = None
         self.waiter: asyncio.Future[None] | None = None
         self.trailers = Headers()
@@ -153,12 +151,10 @@ class Http2Stream:
             self.waiter = None
 
     def take(self) -> bytes:
-        data = bytes(self.data)
-        self.data = bytearray()
-        return data
+        chunks, self.chunks = self.chunks, []
+        return chunks[0] if len(chunks) == 1 else b"".join(chunks)
 
 
-@final
 class Http2Connection:
     def __init__(self, transport: AsyncTransport, profile: Http2Profile) -> None:
         self._transport = transport
@@ -176,7 +172,6 @@ class Http2Connection:
         self._next_stream = 1
         self._write_lock = asyncio.Lock()
         self._buffer = bytearray()
-        self._offset = 0
         self._send_window: int = DEFAULT_WINDOW
         self._window_changed = asyncio.Event()
         self._peer_frame_size = DEFAULT_FRAME_SIZE
@@ -289,14 +284,12 @@ class Http2Connection:
 
     async def write_data(self, stream: Http2Stream, data: bytes, *, end: bool) -> None:
         view = memoryview(data)
-        while view or end:
-            size = min(
-                len(view), self._peer_frame_size, stream.send_window, self._send_window
-            )
-            if size == 0 and view:
+        while True:
+            allowance = min(len(view), stream.send_window, self._send_window)
+            if view and allowance == 0:
                 stream.window_changed.clear()
                 self._window_changed.clear()
-                _ = await asyncio.wait(
+                await asyncio.wait(
                     {
                         asyncio.ensure_future(stream.window_changed.wait()),
                         asyncio.ensure_future(self._window_changed.wait()),
@@ -304,19 +297,30 @@ class Http2Connection:
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 continue
-            last = end and size == len(view)
-            await self._write(
-                self._frame(
+            # every frame the windows allow goes out in one write, not one write per 16 KiB frame
+            batch = bytearray()
+            sent = 0
+            while sent < allowance and len(batch) < DATA_BATCH:
+                size = min(self._peer_frame_size, allowance - sent)
+                last = end and sent + size == len(view)
+                batch += self._frame_head(
                     FrameType.DATA,
                     Flag.END_STREAM if last else 0,
                     stream.identifier,
-                    bytes(view[:size]),
+                    size,
                 )
-            )
-            stream.send_window -= size
-            self._send_window -= size
-            view = view[size:]
-            if last:
+                batch += view[sent : sent + size]
+                sent += size
+            if not view and end:
+                batch += self._frame_head(
+                    FrameType.DATA, Flag.END_STREAM, stream.identifier, 0
+                )
+            if batch:
+                await self._write(bytes(batch))
+            stream.send_window -= sent
+            self._send_window -= sent
+            view = view[sent:]
+            if not view:
                 return
 
     async def close(self) -> None:
@@ -324,8 +328,8 @@ class Http2Connection:
             return
         self.closed = True
         if self._reader is not None and self._reader is not asyncio.current_task():
-            _ = self._reader.cancel()
-            _ = await asyncio.wait({self._reader})
+            self._reader.cancel()
+            await asyncio.wait({self._reader})
         for stream in list(self._streams.values()):
             stream.fail(RemoteDisconnected("the HTTP/2 connection was closed"))
         self._streams.clear()
@@ -398,7 +402,7 @@ class Http2Connection:
     ) -> AsyncGenerator[bytes]:
         try:
             while True:
-                if stream.data:
+                if stream.chunks:
                     yield stream.take()
                 elif stream.error is not None:
                     raise stream.error
@@ -411,7 +415,7 @@ class Http2Connection:
             await self._reset(stream, ErrorCode.CANCEL)
             raise
         finally:
-            _ = self._streams.pop(stream.identifier, None)
+            self._streams.pop(stream.identifier, None)
             self.released()
 
     async def _reset(self, stream: Http2Stream, code: ErrorCode) -> None:
@@ -432,14 +436,34 @@ class Http2Connection:
 
     async def _read_loop(self) -> None:
         try:
+            buffer = self._buffer
             while True:
-                head = await self._read_exactly(9)
-                length = int.from_bytes(head[:3], "big")
-                kind, flags = head[3], head[4]
-                identifier = int.from_bytes(head[5:9], "big") & 0x7FFFFFFF
-                await self._handle(
-                    kind, flags, identifier, await self._read_exactly(length)
-                )
+                piece = await self._transport.read(65536)
+                if not piece:
+                    raise RemoteDisconnected("the server closed the HTTP/2 connection")
+                buffer += piece
+                # every whole frame in the buffer is handled before the next read; the replies they call for go out as one write
+                offset = 0
+                replies: list[bytes] = []
+                with memoryview(buffer) as view:
+                    size = len(view)
+                    while size - offset >= 9:
+                        length = int.from_bytes(view[offset : offset + 3])
+                        end = offset + 9 + length
+                        if end > size:
+                            break
+                        reply = self._handle(
+                            view[offset + 3],
+                            view[offset + 4],
+                            int.from_bytes(view[offset + 5 : offset + 9]) & 0x7FFFFFFF,
+                            bytes(view[offset + 9 : end]),
+                        )
+                        if reply:
+                            replies.append(reply)
+                        offset = end
+                del buffer[:offset]
+                if replies:
+                    await self._write(b"".join(replies))
         except asyncio.CancelledError:
             raise
         except Exception as error:  # noqa: BLE001  the reader task is where any failure becomes a closed connection
@@ -457,30 +481,15 @@ class Http2Connection:
             await self._transport.close()
             self.released()
 
-    async def _read_exactly(self, length: int) -> bytes:
-        buffer = self._buffer
-        while len(buffer) - self._offset < length:
-            if self._offset:
-                del buffer[: self._offset]
-                self._offset = 0
-            piece = await self._transport.read(65536)
-            if not piece:
-                raise RemoteDisconnected("the server closed the HTTP/2 connection")
-            buffer += piece
-        start = self._offset
-        self._offset = start + length
-        return bytes(memoryview(buffer)[start : self._offset])
-
-    async def _handle(
-        self, kind: int, flags: int, identifier: int, payload: bytes
-    ) -> None:
+    def _handle(self, kind: int, flags: int, identifier: int, payload: bytes) -> bytes:
+        # returns the frames the peer's frame calls for, or nothing
         match kind:
             case FrameType.DATA:
-                await self._data(flags, identifier, payload)
+                return self._data(flags, identifier, payload)
             case FrameType.HEADERS | FrameType.CONTINUATION:
                 self._headers(FrameType(kind), flags, identifier, payload)
             case FrameType.SETTINGS:
-                await self._settings(flags, payload)
+                return self._settings(flags, payload)
             case FrameType.WINDOW_UPDATE:
                 self._window_update(identifier, payload)
             case FrameType.RST_STREAM:
@@ -494,7 +503,7 @@ class Http2Connection:
                     )
             case FrameType.PING:
                 if not flags & ACK:
-                    await self._write(self._frame(FrameType.PING, Flag.ACK, 0, payload))
+                    return self._frame(FrameType.PING, Flag.ACK, 0, payload)
             case FrameType.GOAWAY:
                 last = int.from_bytes(payload[:4], "big") & 0x7FFFFFFF
                 self._goaway = last
@@ -512,38 +521,37 @@ class Http2Connection:
                 )
             case _:
                 pass
+        return b""
 
-    async def _data(self, flags: int, identifier: int, payload: bytes) -> None:
+    def _data(self, flags: int, identifier: int, payload: bytes) -> bytes:
         if flags & PADDED:
             payload = payload[1 : len(payload) - payload[0]]
+        updates = b""
         stream = self._streams.get(identifier)
         if stream is not None:
-            stream.data += payload
+            stream.chunks.append(payload)
             if flags & END_STREAM:
                 stream.finished = True
             stream.wake()
             stream.received += len(payload)
             if stream.received > self._local_window // 2 and not stream.finished:
-                await self._write(
-                    self._frame(
-                        FrameType.WINDOW_UPDATE,
-                        0,
-                        identifier,
-                        struct.pack("!I", stream.received),
-                    )
+                updates = self._frame(
+                    FrameType.WINDOW_UPDATE,
+                    0,
+                    identifier,
+                    struct.pack("!I", stream.received),
                 )
                 stream.received = 0
         self._connection_received += len(payload)
         if self._connection_received > self._connection_window // 2:
-            await self._write(
-                self._frame(
-                    FrameType.WINDOW_UPDATE,
-                    0,
-                    0,
-                    struct.pack("!I", self._connection_received),
-                )
+            updates += self._frame(
+                FrameType.WINDOW_UPDATE,
+                0,
+                0,
+                struct.pack("!I", self._connection_received),
             )
             self._connection_received = 0
+        return updates
 
     def _headers(
         self, kind: FrameType, flags: int, identifier: int, payload: bytes
@@ -588,9 +596,9 @@ class Http2Connection:
             stream.finished = True
             stream.wake()
 
-    async def _settings(self, flags: int, payload: bytes) -> None:
+    def _settings(self, flags: int, payload: bytes) -> bytes:
         if flags & ACK:
-            return
+            return b""
         for offset in range(0, len(payload) - 5, 6):
             identifier, value = (
                 int.from_bytes(payload[offset : offset + 2], "big"),
@@ -614,7 +622,7 @@ class Http2Connection:
                     pass
         if not self._settings_received.done():
             self._settings_received.set_result(None)
-        await self._write(self._frame(FrameType.SETTINGS, Flag.ACK, 0, b""))
+        return self._frame(FrameType.SETTINGS, Flag.ACK, 0, b"")
 
     def _window_update(self, identifier: int, payload: bytes) -> None:
         increment = int.from_bytes(payload[:4], "big") & 0x7FFFFFFF
@@ -628,10 +636,15 @@ class Http2Connection:
     @staticmethod
     def _frame(kind: FrameType, flags: int, identifier: int, payload: bytes) -> bytes:
         return (
-            len(payload).to_bytes(3, "big")
+            Http2Connection._frame_head(kind, flags, identifier, len(payload)) + payload
+        )
+
+    @staticmethod
+    def _frame_head(kind: FrameType, flags: int, identifier: int, length: int) -> bytes:
+        return (
+            length.to_bytes(3, "big")
             + bytes((kind, flags))
             + struct.pack("!I", identifier)
-            + payload
         )
 
     @staticmethod
@@ -650,7 +663,6 @@ class Http2Connection:
         pass
 
 
-@final
 class Http2StreamTransport:
     def __init__(
         self, connection: Http2Connection, stream: Http2Stream, deadline: Deadline
@@ -664,7 +676,7 @@ class Http2StreamTransport:
     async def read(self, limit: int) -> bytes:
         stream = self._stream
         while not self._pending:
-            if stream.data:
+            if stream.chunks:
                 self._pending = stream.take()
             elif stream.error is not None:
                 raise stream.error

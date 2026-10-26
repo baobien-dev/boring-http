@@ -3,8 +3,8 @@ import secrets
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Final, final
 
+from boring_ssl2 import QuicVersion
 from ssl2 import AsyncTransport, ClientHello, PseudoHeader
 
 from boring_http.errors import (
@@ -16,7 +16,7 @@ from boring_http.errors import (
 from boring_http.message import Headers, HTTPVersion, Request, Response
 from boring_http.qpack import Qpack
 from boring_http.quic.connection import TransportParameters
-from boring_http.quic.packet import QUIC_V1, Reader, Writer
+from boring_http.quic.packet import Reader, Writer
 from boring_http.quic.protocol import OriginMemory, QuicClient
 from boring_http.timing import Deadline, Timeout
 
@@ -67,7 +67,6 @@ class ErrorCode(IntEnum):
     VERSION_FALLBACK = 0x110
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class Http3Profile:
     settings: tuple[tuple[int, int], ...] = (
@@ -89,17 +88,16 @@ class Http3Profile:
         PseudoHeader.PATH,
     )
     transport: TransportParameters = field(default_factory=TransportParameters)
-    quic_version: int = QUIC_V1
+    quic_version: QuicVersion = QuicVersion.V1
     tls: ClientHello | None = None
     grease: bool = True
 
 
-DEFAULT: Final = Http3Profile()
+CHROME_HTTP3 = Http3Profile()
 # RFC 8470 section 5.2: the requests a client may send before the handshake, since a server may see them twice
-SAFE_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS"})
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
-@final
 class StreamFrames:
     def __init__(self, client: QuicClient, stream_id: int, deadline: Deadline) -> None:
         self._client = client
@@ -150,7 +148,6 @@ class StreamFrames:
         return True
 
 
-@final
 class Http3Connection:
     def __init__(
         self,
@@ -235,7 +232,7 @@ class Http3Connection:
             # RFC 9114 section 7.2.4.2: 0-RTT requests run under the settings the server sent last time
             self._peer_settings = dict(self._memory.settings)
             return
-        _ = await asyncio.wait(
+        await asyncio.wait(
             {self._settings_received, self._quic.terminated},
             return_when=asyncio.FIRST_COMPLETED,
         )
@@ -321,7 +318,7 @@ class Http3Connection:
             return
         self.closed = True
         for reader in self._readers:
-            _ = reader.cancel()
+            reader.cancel()
         self._quic.close(ErrorCode.NO_ERROR)
         self.released()
 
@@ -446,7 +443,7 @@ class Http3Connection:
             (name.decode("latin-1"), value.decode("latin-1")) for name, value in fields
         ]
         try:
-            _ = Headers(
+            Headers(
                 [(name, value) for name, value in decoded if not name.startswith(":")]
             )
         except ValueError as error:
@@ -531,7 +528,6 @@ class Http3Connection:
         pass
 
 
-@final
 class Http3StreamTransport:
     def __init__(
         self, quic: QuicClient, stream_id: int, deadline: Deadline, frames: StreamFrames

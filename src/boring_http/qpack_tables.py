@@ -1,7 +1,5 @@
 # generated from the text of RFC 9204 appendix A, so regenerate rather than edit
-from typing import Final
-
-STATIC_TABLE: Final[tuple[tuple[bytes, bytes], ...]] = (
+STATIC_TABLE: tuple[tuple[bytes, bytes], ...] = (
     (b":authority", b""),
     (b":path", b"/"),
     (b"age", b"0"),

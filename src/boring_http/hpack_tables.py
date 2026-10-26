@@ -1,7 +1,5 @@
 # generated from the text of RFC 7541 appendices A and B, so regenerate rather than edit
-from typing import Final
-
-STATIC_TABLE: Final[tuple[tuple[bytes, bytes], ...]] = (
+STATIC_TABLE: tuple[tuple[bytes, bytes], ...] = (
     (b":authority", b""),
     (b":method", b"GET"),
     (b":method", b"POST"),
@@ -65,7 +63,7 @@ STATIC_TABLE: Final[tuple[tuple[bytes, bytes], ...]] = (
     (b"www-authenticate", b""),
 )
 
-HUFFMAN_CODES: Final[tuple[tuple[int, int], ...]] = (
+HUFFMAN_CODES: tuple[tuple[int, int], ...] = (
     (0x1FF8, 13),
     (0x7FFFD8, 23),
     (0xFFFFFE2, 28),

@@ -1,6 +1,6 @@
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Protocol, final
+from typing import Protocol
 
 from ssl2 import Proxy
 
@@ -33,7 +33,6 @@ class Connection(Protocol):
 type Connector = Callable[[URL, Proxy | None, bool], Awaitable[Connection]]
 
 
-@final
 class Pool:
     def __init__(
         self, connector: Connector, max_connections: int, max_connections_per_host: int
@@ -64,10 +63,10 @@ class Pool:
                 # every connection is busy and no new one may open: wait for a stream to finish or a connection to close
                 changed.clear()
                 async with deadline.phase("connect"):
-                    _ = await changed.wait()
+                    await changed.wait()
             async with deadline.phase("connect"):
-                _ = await limit.acquire()
-                _ = await self._total.acquire()
+                await limit.acquire()
+                await self._total.acquire()
             try:
                 connection = await self._connector(url, proxy, quic)
             except BaseException:

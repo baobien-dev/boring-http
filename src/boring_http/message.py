@@ -1,4 +1,4 @@
-import json as json_codec
+import json
 import re
 import secrets
 from collections.abc import (
@@ -15,17 +15,17 @@ from email.utils import parsedate_to_datetime
 from enum import StrEnum
 from functools import lru_cache
 from time import monotonic, time
-from typing import Final, Self, cast, final, overload, override
+from typing import Self, cast, overload, override
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 from boring_http.codings import ContentDecoder
 from boring_http.cookies import Cookie
 from boring_http.errors import HTTPError
 
-TOKEN: Final = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
-PATH_SAFE: Final = "/%:@!$&'()*+,;=~-._"
-QUERY_SAFE: Final = PATH_SAFE + "?"
-CONNECTION_SPECIFIC: Final = frozenset(
+TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+PATH_SAFE = "/%:@!$&'()*+,;=~-._"
+QUERY_SAFE = PATH_SAFE + "?"
+CONNECTION_SPECIFIC = frozenset(
     {
         "connection",
         "keep-alive",
@@ -35,9 +35,9 @@ CONNECTION_SPECIFIC: Final = frozenset(
         "host",
     }
 )
-BODY_METHODS: Final = frozenset({"POST", "PUT", "PATCH"})
-REDIRECT_STATUSES: Final = frozenset({301, 302, 303, 307, 308})
-DEFAULT_PORTS: Final = {"http": 80, "ws": 80, "https": 443, "wss": 443}
+BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+DEFAULT_PORTS = {"http": 80, "ws": 80, "https": 443, "wss": 443}
 
 type HeaderItems = Mapping[str, str] | Sequence[tuple[str, str]] | Headers
 type ParamValue = str | int | float | bool | None
@@ -64,7 +64,6 @@ class HTTPVersion(StrEnum):
         }.get(spelled)
 
 
-@final
 class Headers:
     def __init__(self, items: HeaderItems | None = None) -> None:
         self._items: list[tuple[str, str]] = []
@@ -154,7 +153,11 @@ class Headers:
         self._lowered = [key for key in self._lowered if key != lowered]
 
     def copy(self) -> Self:
-        return type(self)(self._items)
+        # the items passed the checks when they came in, so a copy does not run them again
+        copied = type(self)()
+        copied._items = list(self._items)
+        copied._lowered = list(self._lowered)
+        return copied
 
     def merged(self, other: Self) -> Self:
         result = self.copy()
@@ -183,8 +186,6 @@ class Headers:
         return name, value
 
 
-@final
-@final
 @dataclass(frozen=True, slots=True)
 class URL:
     scheme: str
@@ -283,7 +284,6 @@ class URL:
         return str(value)
 
 
-@final
 class Body:
     def __init__(
         self,
@@ -298,7 +298,7 @@ class Body:
     @classmethod
     def json(cls, value: object) -> Self:
         return cls(
-            json_codec.dumps(value, separators=(",", ":"), ensure_ascii=False).encode(),
+            json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode(),
             content_type="application/json",
         )
 
@@ -371,7 +371,6 @@ class Body:
                 yield chunk
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class Request:
     method: str
@@ -381,13 +380,9 @@ class Request:
 
     def wire_headers(self, version: HTTPVersion) -> Headers:
         if version is HTTPVersion.HTTP_1:
-            wire = (
-                Headers()
-                if "host" in self.headers
-                else Headers([("Host", self.url.authority)])
-            )
-            for name, value in self.headers:
-                wire.add(name, value)
+            wire = self.headers.copy()
+            if "host" not in wire:
+                wire.insert(0, "Host", self.url.authority)
             if "content-length" not in wire and "transfer-encoding" not in wire:
                 if self.body is None:
                     if self.method in BODY_METHODS:
@@ -414,7 +409,6 @@ class Request:
         return wire
 
 
-@final
 class Response:
     def __init__(
         self,
@@ -546,7 +540,7 @@ class Response:
         return self.body.decode(self.charset or "utf-8", "replace")
 
     def json(self) -> object:
-        return cast(object, json_codec.loads(self.body))
+        return cast(object, json.loads(self.body))
 
     def raise_for_status(self) -> None:
         if self.status >= 400:
@@ -567,6 +561,11 @@ class Response:
 
     async def aiter_bytes(self) -> AsyncIterator[bytes]:
         codings = self.content_encoding if self._decode else ()
+        if not codings:
+            async for chunk in self.aiter_raw():
+                if chunk:
+                    yield chunk
+            return
         decoder = ContentDecoder(codings)
         async for chunk in self.aiter_raw():
             decoded = decoder.decode(chunk)

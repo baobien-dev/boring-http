@@ -1,20 +1,18 @@
 import asyncio
 from collections.abc import Iterable
-from typing import Final, final
 
 from boring_http.errors import ProtocolError
 from boring_http.hpack import BlockReader, BlockWriter
 from boring_http.qpack_tables import STATIC_TABLE
 
-STATIC_PAIRS: Final = {pair: index for index, pair in enumerate(STATIC_TABLE)}
-STATIC_NAMES: Final = {
+STATIC_PAIRS = {pair: index for index, pair in enumerate(STATIC_TABLE)}
+STATIC_NAMES = {
     name: index for index, (name, _) in reversed(list(enumerate(STATIC_TABLE)))
 }
-ENTRY_OVERHEAD: Final = 32
-ENCODER_STREAM_LIMIT: Final = 1 << 20
+ENTRY_OVERHEAD = 32
+ENCODER_STREAM_LIMIT = 1 << 20
 
 
-@final
 class Qpack:
     def __init__(self, maximum_capacity: int) -> None:
         self._maximum = maximum_capacity

@@ -1,12 +1,13 @@
 import asyncio
+import errno
 import socket
 import sys
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Final, Self, final
+from typing import Self
 
-from boring_ssl2 import ClientContext
-from ssl2 import Proxy, ProxyError, StreamTransport, TLSStream
+from boring_ssl2 import ClientContext, QuicVersion
+from ssl2 import Proxy, ProxyError, SocketTransport, TLSStream
 
 from boring_http.errors import (
     ConnectError,
@@ -28,19 +29,20 @@ from boring_http.quic.connection import (
     TransportParameters,
     VersionNegotiated,
 )
-from boring_http.quic.packet import QUIC_V1
 
-RECEIVE_BUFFER: Final = 4 << 20
-READ_BURST: Final = 32
+RECEIVE_BUFFER = 4 << 20
+READ_BURST = 32
 # Linux UDP socket options for generic segmentation and receive offload; the socket module does not name them
-UDP_SEGMENT: Final = 103
-UDP_GRO: Final = 104
-SEGMENT_SPACE: Final = socket.CMSG_SPACE(2)
+UDP_SEGMENT = 103
+UDP_GRO = 104
+SEGMENT_SPACE = socket.CMSG_SPACE(2)
+# Linux IP socket options for the don't-fragment flag, which RFC 9000 section 14 asks of every QUIC datagram
+IP_MTU_DISCOVER, IP_PMTUDISC_DO = 10, 2
+IPV6_MTU_DISCOVER, IPV6_PMTUDISC_DO = 23, 2
 # one 64 KiB landing area for every connection on the loop; a read callback is never interrupted by another
-RECEIVED: Final = memoryview(bytearray(65536))
+RECEIVED = memoryview(bytearray(65536))
 
 
-@final
 @dataclass(slots=True)
 class OriginMemory:
     # what a later 0-RTT connection to the same origin runs under until the new handshake replaces it
@@ -49,24 +51,23 @@ class OriginMemory:
     round_trip_time: int = 0
 
 
-@final
 class VersionChange(Exception):
-    def __init__(self, version: int) -> None:
+    def __init__(self, version: QuicVersion) -> None:
         super().__init__(f"the server offered QUIC version {version:#010x}")
         self.version = version
 
 
-@final
 class SocksRelay:
     def __init__(
         self,
         proxy: Proxy,
         destination: tuple[str, int],
-        writer: asyncio.StreamWriter,
+        control: SocketTransport,
         address: tuple[str, int],
     ) -> None:
         self._header = proxy.udp_header(destination)
-        self._writer = writer
+        # the TCP connection that holds the UDP association open
+        self._control = control
         self.address = address
 
     @classmethod
@@ -77,13 +78,13 @@ class SocksRelay:
                 host, port, family=family, type=socket.SOCK_DGRAM
             )
             host = str(candidates[0][4][0])
-        reader, writer = await asyncio.open_connection(proxy.host, proxy.port)
+        control = await SocketTransport.connect((proxy.host, proxy.port))
         try:
-            address = await TLSStream.associate(proxy, StreamTransport(reader, writer))
+            address = await TLSStream.associate(proxy, control)
         except BaseException:
-            writer.close()
+            control.socket.close()
             raise
-        return cls(proxy, (host, port), writer, address)
+        return cls(proxy, (host, port), control, address)
 
     def wrap(self, datagram: bytes) -> bytes:
         return self._header + datagram
@@ -93,13 +94,12 @@ class SocksRelay:
         return Proxy.udp_payload(datagram)
 
     def close(self) -> None:
-        self._writer.close()
+        self._control.socket.close()
 
 
-@final
 class Inbox:
     def __init__(self) -> None:
-        self.data = bytearray()
+        self.chunks: list[bytes] = []
         self.ended = False
         self.error: BaseException | None = None
         self.waiter: asyncio.Future[None] | None = None
@@ -109,7 +109,6 @@ class Inbox:
             self.waiter.set_result(None)
 
 
-@final
 class QuicClient:
     def __init__(
         self,
@@ -149,7 +148,7 @@ class QuicClient:
         address: tuple[str, int],
         parameters: TransportParameters,
         *,
-        version: int = QUIC_V1,
+        version: QuicVersion = QuicVersion.V1,
         token: bytes = b"",
         proxy: Proxy | None = None,
         memory: OriginMemory | None = None,
@@ -164,6 +163,14 @@ class QuicClient:
             sock = socket.socket(family, kind, protocol)
             sock.setblocking(False)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, RECEIVE_BUFFER)
+            if sys.platform == "linux":
+                # a datagram the path cannot carry whole is refused by the kernel rather than fragmented
+                if family == socket.AF_INET6:
+                    sock.setsockopt(
+                        socket.IPPROTO_IPV6, IPV6_MTU_DISCOVER, IPV6_PMTUDISC_DO
+                    )
+                else:
+                    sock.setsockopt(socket.IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DO)
             sock.connect(resolved)
             connection = QuicConnection(
                 context,
@@ -252,10 +259,9 @@ class QuicClient:
     async def receive(self, stream_id: int) -> bytes:
         inbox = self._inboxes.setdefault(stream_id, Inbox())
         while True:
-            if inbox.data:
-                data = bytes(inbox.data)
-                inbox.data = bytearray()
-                return data
+            if inbox.chunks:
+                chunks, inbox.chunks = inbox.chunks, []
+                return chunks[0] if len(chunks) == 1 else b"".join(chunks)
             if inbox.error is not None:
                 raise inbox.error
             if inbox.ended:
@@ -272,8 +278,8 @@ class QuicClient:
         if self._closed:
             return
         self._closed = True
-        _ = self._loop.remove_reader(self._socket.fileno())
-        _ = self._loop.remove_writer(self._socket.fileno())
+        self._loop.remove_reader(self._socket.fileno())
+        self._loop.remove_writer(self._socket.fileno())
         self._socket.close()
         for handle in (self._timer, self._pacer, self._flusher):
             if handle is not None:
@@ -302,9 +308,13 @@ class QuicClient:
             except BlockingIOError:
                 break
             except OSError as error:
-                self._fail(ConnectError(f"QUIC socket error: {error}"))
-                self.close()
-                return
+                if error.errno != errno.EMSGSIZE:
+                    self._fail(ConnectError(f"QUIC socket error: {error}"))
+                    self.close()
+                    return
+                # a router answered a datagram with "fragmentation needed"; the kernel hands that over here
+                self._connection.datagram_too_long()
+                continue
             # with receive offload one read may carry several datagrams of one size, the last possibly shorter
             for offset in range(0, size, max(segment, 1)):
                 datagram = bytes(RECEIVED[offset : min(offset + segment, size)])
@@ -349,7 +359,7 @@ class QuicClient:
                 end += 1
             try:
                 if end - index > 1:
-                    _ = self._socket.sendmsg(
+                    self._socket.sendmsg(
                         [b"".join(wires[index:end])],
                         [
                             (
@@ -360,16 +370,20 @@ class QuicClient:
                         ],
                     )
                 else:
-                    _ = self._socket.send(wires[index])
+                    self._socket.send(wires[index])
             except BlockingIOError:
                 # the kernel send buffer is full: the rest waits, in order, until the socket drains
                 self._unsent.extend(wires[index:])
                 self._loop.add_writer(self._socket.fileno(), self._writable)
                 break
             except OSError as error:
-                self._fail(ConnectError(f"QUIC socket error: {error}"))
-                self.close()
-                return
+                if error.errno != errno.EMSGSIZE:
+                    self._fail(ConnectError(f"QUIC socket error: {error}"))
+                    self.close()
+                    return
+                # the path cannot carry a datagram this large, or a router said so about an earlier one:
+                # these count as lost, and the connection goes back to the size every path carries
+                self._connection.datagram_too_long()
             index = end
         self._dispatch()
         self._arm_timer()
@@ -389,15 +403,17 @@ class QuicClient:
     def _send_queued(self) -> bool:
         while self._unsent:
             try:
-                _ = self._socket.send(self._unsent[0])
+                self._socket.send(self._unsent[0])
             except BlockingIOError:
                 return False
             except OSError as error:
-                self._fail(ConnectError(f"QUIC socket error: {error}"))
-                self.close()
-                return False
-            _ = self._unsent.popleft()
-        _ = self._loop.remove_writer(self._socket.fileno())
+                if error.errno != errno.EMSGSIZE:
+                    self._fail(ConnectError(f"QUIC socket error: {error}"))
+                    self.close()
+                    return False
+                self._connection.datagram_too_long()
+            self._unsent.popleft()
+        self._loop.remove_writer(self._socket.fileno())
         return True
 
     def _writable(self) -> None:
@@ -427,7 +443,8 @@ class QuicClient:
                     if inbox is None:
                         inbox = self._inboxes[stream_id] = Inbox()
                         self.incoming.put_nowait(stream_id)
-                    inbox.data += data
+                    if data:
+                        inbox.chunks.append(data)
                     if end:
                         inbox.ended = True
                     inbox.wake()
@@ -469,7 +486,7 @@ class QuicClient:
             if not future.done():
                 future.set_exception(error)
                 # a 0-RTT connection may never await the handshake; reading the exception keeps asyncio from logging it
-                _ = future.exception()
+                future.exception()
         for inbox in self._inboxes.values():
             inbox.error = error
             inbox.wake()

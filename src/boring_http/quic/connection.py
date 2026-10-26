@@ -2,16 +2,20 @@ import secrets
 from collections import deque
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Final, final
 
-from boring_ssl2 import ClientContext, EncryptionLevel, PacketProtection, QuicHandshake
+from boring_ssl2 import (
+    ClientContext,
+    EncryptionLevel,
+    PacketProtection,
+    QuicHandshake,
+    QuicVersion,
+)
 from ssl2 import NextProtocol, TLSError
 
 from boring_http.errors import ConnectError, ProtocolError
 from boring_http.quic.packet import (
     ACK_ELICITING_EXCLUSIONS,
-    QUIC_V1,
-    QUIC_V2,
+    FORM_LONG,
     Ack,
     ConnectionClose,
     Crypto,
@@ -43,22 +47,23 @@ from boring_http.quic.packet import (
 from boring_http.quic.recovery import GRANULARITY, Recovery, SentPacket
 from boring_http.quic.streams import ReceiveStream, SendStream
 
-DATAGRAM_SIZE: Final = 1200
-TAG_LENGTH: Final = 16
-SAMPLE_LENGTH: Final = 16
-CRYPTO_STREAM: Final = -1
-MAX_BURST: Final = 10
-ACK_THRESHOLD: Final = 2
-PACING_GAIN: Final = 1.25
-INTERNAL_ERROR_ALERT: Final = 80
-VERSIONS: Final = (QUIC_V1, QUIC_V2)
-LEVEL_OF: Final = {
+DATAGRAM_SIZE = 1200
+# RFC 9000 section 14.2: what a 1500 byte link carries under IPv6 and UDP headers; Chrome probes up to this size too
+PROBED_DATAGRAM_SIZE = 1452
+TAG_LENGTH = 16
+SAMPLE_LENGTH = 16
+CRYPTO_STREAM = -1
+MAX_BURST = 10
+ACK_THRESHOLD = 2
+PACING_GAIN = 1.25
+INTERNAL_ERROR_ALERT = 80
+LEVEL_OF = {
     PacketType.INITIAL: EncryptionLevel.INITIAL,
     PacketType.ZERO_RTT: EncryptionLevel.EARLY_DATA,
     PacketType.HANDSHAKE: EncryptionLevel.HANDSHAKE,
     PacketType.ONE_RTT: EncryptionLevel.APPLICATION,
 }
-PACKET_TYPE_OF: Final = {
+PACKET_TYPE_OF = {
     EncryptionLevel.INITIAL: PacketType.INITIAL,
     EncryptionLevel.EARLY_DATA: PacketType.ZERO_RTT,
     EncryptionLevel.HANDSHAKE: PacketType.HANDSHAKE,
@@ -91,7 +96,7 @@ class Parameter(IntEnum):
     GOOGLE_CONNECTION_OPTIONS = 0x3128
 
 
-EARLY_DATA_LIMITS: Final = (
+EARLY_DATA_LIMITS = (
     Parameter.INITIAL_MAX_DATA,
     Parameter.INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
     Parameter.INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
@@ -100,7 +105,7 @@ EARLY_DATA_LIMITS: Final = (
     Parameter.INITIAL_MAX_STREAMS_UNI,
 )
 # RFC 9000 section 7.4.1: values a client must take from the new handshake, never from the previous one
-NEVER_REMEMBERED: Final = (
+NEVER_REMEMBERED = (
     Parameter.ACK_DELAY_EXPONENT,
     Parameter.MAX_ACK_DELAY,
     Parameter.ACTIVE_CONNECTION_ID_LIMIT,
@@ -110,7 +115,6 @@ NEVER_REMEMBERED: Final = (
 )
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class TransportParameters:
     max_idle_timeout: int = 30000
@@ -151,8 +155,8 @@ class TransportParameters:
     def encode(
         self,
         source_connection_id: bytes,
-        version: int,
-        versions: tuple[int, ...],
+        version: QuicVersion,
+        versions: tuple[QuicVersion, ...],
         round_trip_time: int | None = None,
     ) -> bytes:
         writer = Writer()
@@ -177,7 +181,7 @@ class TransportParameters:
             elif parameter is Parameter.INITIAL_SOURCE_CONNECTION_ID:
                 value = source_connection_id
             elif parameter is Parameter.VERSION_INFORMATION:
-                available = list(versions)
+                available: list[int] = list(versions)
                 if self.grease_version:
                     # RFC 9368 section 2.1 / Chrome: a reserved version at a random place among the available ones
                     available.insert(
@@ -218,7 +222,6 @@ class TransportParameters:
         return writer.finish()
 
 
-@final
 class PeerParameters:
     def __init__(self, data: bytes) -> None:
         self.raw: dict[int, bytes] = {}
@@ -235,7 +238,6 @@ class PeerParameters:
         return self.raw.get(parameter)
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class StreamDataReceived:
     stream_id: int
@@ -243,27 +245,23 @@ class StreamDataReceived:
     end: bool
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class StreamReset:
     stream_id: int
     error: int
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class StopSendingReceived:
     stream_id: int
     error: int
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class HandshakeCompleted:
     pass
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class ConnectionTerminated:
     error: int
@@ -273,7 +271,7 @@ class ConnectionTerminated:
 
 @dataclass(frozen=True, slots=True)
 class VersionNegotiated:
-    version: int
+    version: QuicVersion
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,7 +284,6 @@ class EarlyDataRejected:
     pass
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class DatagramReceived:
     data: bytes
@@ -305,7 +302,6 @@ type Event = (
 )
 
 
-@final
 class QuicConnection:
     def __init__(
         self,
@@ -314,12 +310,16 @@ class QuicConnection:
         parameters: TransportParameters,
         now: float,
         *,
-        version: int = QUIC_V1,
+        version: QuicVersion = QuicVersion.V1,
         token: bytes = b"",
         remembered: bytes = b"",
         round_trip_time: int | None = None,
     ) -> None:
-        self._version = version
+        # RFC 9368: the first flight is always v1; a preferred v2 is offered in version_information and the server may switch
+        self._version = QuicVersion.V1
+        self._available = (
+            (version, QuicVersion.V1) if version is not QuicVersion.V1 else (version,)
+        )
         self._parameters = parameters
         self._source_id = PacketProtection.random(8)
         self._destination_id = PacketProtection.random(8)
@@ -331,11 +331,13 @@ class QuicConnection:
         self._handshake = QuicHandshake(
             context,
             server_name,
-            parameters.encode(self._source_id, version, (version,), round_trip_time),
+            parameters.encode(
+                self._source_id, self._version, self._available, round_trip_time
+            ),
             remembered,
         )
         self._recovery = Recovery(DATAGRAM_SIZE)
-        send, receive = PacketProtection.initial(version, self._destination_id)
+        send, receive = PacketProtection.initial(self._version, self._destination_id)
         self._keys: dict[
             EncryptionLevel, tuple[PacketProtection | None, PacketProtection | None]
         ] = {EncryptionLevel.INITIAL: (receive, send)}
@@ -349,6 +351,8 @@ class QuicConnection:
         }
         self._send_streams: dict[int, SendStream] = {}
         self._receive_streams: dict[int, ReceiveStream] = {}
+        # streams holding data the application has not been handed yet, in arrival order
+        self._readable: dict[int, ReceiveStream] = {}
         self._next_bidi = 0
         self._next_uni = 2
         self._peer_max_streams = {True: 0, False: 0}
@@ -368,6 +372,8 @@ class QuicConnection:
         self._events: deque[Event] = deque()
         self._handshake_done = False
         self._handshake_confirmed = False
+        self._datagram_size = DATAGRAM_SIZE
+        self._mtu_probe: int | None = None
         self._closing: ConnectionClose | None = None
         self._close_sent = False
         self._terminated = False
@@ -386,7 +392,7 @@ class QuicConnection:
             # 0-RTT runs under the limits the server granted last time until the handshake brings the new ones
             granted = PeerParameters(self._handshake.remembered_transport_parameters)
             for parameter in NEVER_REMEMBERED:
-                _ = granted.raw.pop(parameter, None)
+                granted.raw.pop(parameter, None)
             self._apply_peer_parameters(granted)
         self._drive_handshake()
 
@@ -409,6 +415,14 @@ class QuicConnection:
         return int(self._recovery.smoothed_rtt * 1_000_000)
 
     @property
+    def version(self) -> int:
+        return self._version
+
+    @property
+    def peer_chain(self) -> tuple[bytes, ...]:
+        return self._handshake.buffer.getpeerchain()
+
+    @property
     def terminated(self) -> bool:
         return self._terminated
 
@@ -417,7 +431,20 @@ class QuicConnection:
         return self._handshake.buffer.getpeercert()
 
     def next_event(self) -> Event | None:
-        return self._events.popleft() if self._events else None
+        if self._events:
+            return self._events.popleft()
+        if self._readable:
+            # one event carries everything a stream received since the last read, not one event per packet
+            stream_id = next(iter(self._readable))
+            receive = self._readable.pop(stream_id)
+            chunks, receive.chunks = receive.chunks, []
+            return StreamDataReceived(
+                stream_id,
+                chunks[0] if len(chunks) == 1 else b"".join(chunks),
+                receive.final_size is not None
+                and receive.next_offset == receive.final_size,
+            )
+        return None
 
     def can_open_stream(self, *, bidirectional: bool = True) -> bool:
         return (
@@ -484,7 +511,23 @@ class QuicConnection:
             return
         self._last_activity = now
         offset = 0
-        while offset < len(data):
+        size = len(data)
+        while offset < size:
+            if not data[offset] & FORM_LONG:
+                # a short header packet is the last in its datagram; only where its number starts matters here
+                keys = self._keys.get(EncryptionLevel.APPLICATION)
+                if keys is not None and keys[0] is not None:
+                    self._receive_packet(
+                        data,
+                        offset,
+                        offset + 1 + len(self._source_id),
+                        size,
+                        EncryptionLevel.APPLICATION,
+                        keys[0],
+                        now,
+                        b"",
+                    )
+                return
             try:
                 header = Header.parse(data, offset, len(self._source_id))
             except ProtocolError:
@@ -495,17 +538,25 @@ class QuicConnection:
             if header.packet_type is PacketType.RETRY:
                 self._on_retry(header, data[offset:])
                 return
-            if (
-                header.packet_type is not PacketType.ONE_RTT
-                and header.version != self._version
-            ):
-                return
+            if header.version != self._version:
+                if header.version not in self._available or self._handshake_done:
+                    return
+                self._switch_version(header.version)
             level = LEVEL_OF[header.packet_type]
             keys = self._keys.get(level)
             if keys is None or keys[0] is None:
                 offset = header.end
                 continue
-            self._receive_packet(header, data, offset, level, keys[0], now)
+            self._receive_packet(
+                data,
+                offset,
+                header.number_offset,
+                header.end,
+                level,
+                keys[0],
+                now,
+                header.source,
+            )
             offset = header.end
 
     def datagrams_to_send(self, now: float) -> list[bytes]:
@@ -544,6 +595,11 @@ class QuicConnection:
             / max(recovery.smoothed_rtt, GRANULARITY)
         )
         return size / rate
+
+    def datagram_too_long(self) -> None:
+        # the kernel refused a datagram for its size, so from here on only the size every path carries goes out
+        self._datagram_size = DATAGRAM_SIZE
+        self._mtu_probe = None
 
     def next_timer(self) -> float | None:
         candidates = [self._last_activity + self._idle_timeout]
@@ -605,28 +661,30 @@ class QuicConnection:
 
     def _receive_packet(
         self,
-        header: Header,
         data: bytes,
         offset: int,
+        number_offset: int,
+        end: int,
         level: EncryptionLevel,
         keys: PacketProtection,
         now: float,
+        source: bytes,
     ) -> None:
-        number_offset = header.number_offset
-        if header.end - number_offset < 4 + SAMPLE_LENGTH:
+        if end - number_offset < 4 + SAMPLE_LENGTH:
             return
-        sample = data[number_offset + 4 : number_offset + 4 + SAMPLE_LENGTH]
-        mask = keys.mask(sample)
+        mask = keys.mask(data[number_offset + 4 : number_offset + 4 + SAMPLE_LENGTH])
         first = data[offset] ^ (mask[0] & (0x0F if data[offset] & 0x80 else 0x1F))
         length = (first & 0x03) + 1
-        number_bytes = bytes(
-            byte ^ mask[1 + index]
-            for index, byte in enumerate(data[number_offset : number_offset + length])
+        truncated = int.from_bytes(
+            data[number_offset : number_offset + length]
+        ) ^ int.from_bytes(mask[1 : 1 + length])
+        number = self._recovery.space(level).decode_number(truncated, length * 8)
+        protected = (
+            bytes((first,))
+            + data[offset + 1 : number_offset]
+            + truncated.to_bytes(length)
         )
-        space = self._recovery.space(level)
-        number = space.decode_number(int.from_bytes(number_bytes, "big"), length * 8)
-        protected = bytes((first,)) + data[offset + 1 : number_offset] + number_bytes
-        ciphertext = data[number_offset + length : header.end]
+        ciphertext = data[number_offset + length : end]
         if (
             level is EncryptionLevel.APPLICATION
             and bool(first & 0x04) != self._key_phase
@@ -650,7 +708,7 @@ class QuicConnection:
             and not self._handshake_done
             and self._destination_id in (self._original_destination, self._retry_source)
         ):
-            self._destination_id = header.source
+            self._destination_id = source
         self._process_payload(level, number, payload, now)
 
     def _process_payload(
@@ -663,20 +721,21 @@ class QuicConnection:
             if not isinstance(frame, ACK_ELICITING_EXCLUSIONS):
                 ack_eliciting = True
             match frame:
+                case Stream():
+                    self._on_stream(frame)
                 case Ack():
                     self._on_ack(level, frame, now)
                 case Crypto(offset, data):
-                    receive = self._crypto_receive[level]
-                    _ = receive.on_frame(Stream(CRYPTO_STREAM, offset, data, False))
-                    if receive.readable:
-                        self._handshake.provide(level, receive.read())
+                    received = self._crypto_receive[level].on_frame(
+                        Stream(CRYPTO_STREAM, offset, data, False)
+                    )
+                    if received:
+                        self._handshake.provide(level, received)
                         if self._handshake_done:
                             # NewSessionTicket and the other post-handshake messages; this is what fills the session cache
                             self._handshake.process_post_handshake()
                         else:
                             self._drive_handshake()
-                case Stream():
-                    self._on_stream(frame)
                 case MaxData(maximum):
                     self._peer_max_data = max(self._peer_max_data, maximum)
                 case MaxStreamData(stream_id, maximum):
@@ -754,13 +813,16 @@ class QuicConnection:
         acked, lost = self._recovery.on_ack_received(level, ack, now, exponent)
         space = self._recovery.space(level)
         for packet in acked:
+            if packet.mtu_probe:
+                # the path carried the probe, so every datagram from here on may be that large
+                self._datagram_size = packet.size
             for frame in packet.frames:
                 if isinstance(frame, Ack):
                     space.forget(frame.largest)
                 elif isinstance(frame, Stream):
                     self._stream_acked(frame.stream_id)
                 elif isinstance(frame, ResetStream):
-                    _ = self._send_streams.pop(frame.stream_id, None)
+                    self._send_streams.pop(frame.stream_id, None)
         for packet in lost:
             self._on_lost(level, packet)
         # RFC 9001 section 4.1.2: an acknowledgement of a 1-RTT packet confirms the handshake; one of a 0-RTT packet does not
@@ -839,16 +901,15 @@ class QuicConnection:
                     MaxStreams(bidirectional, self._local_max_streams[bidirectional])
                 )
         before = receive.next_offset
-        after = receive.on_frame(frame)
-        self._data_received += max(after - before, 0)
-        if receive.readable:
-            data = receive.read()
-            end = (
-                receive.final_size is not None
-                and receive.next_offset == receive.final_size
-            )
-            if data or end:
-                self._events.append(StreamDataReceived(stream_id, data, end))
+        data = receive.on_frame(frame)
+        self._data_received += receive.next_offset - before
+        end = (
+            receive.final_size is not None and receive.next_offset == receive.final_size
+        )
+        if data or end:
+            if data:
+                receive.chunks.append(data)
+            self._readable[stream_id] = receive
             window = (
                 self._parameters.initial_max_stream_data_bidi_local
                 if bidirectional
@@ -933,6 +994,14 @@ class QuicConnection:
                 raise ProtocolError(
                     "the server's retry_source_connection_id does not match"
                 )
+            information = peer.connection_id(Parameter.VERSION_INFORMATION)
+            if information is not None and information[:4] != self._version.to_bytes(
+                4, "big"
+            ):
+                # RFC 9368 section 4: the server's chosen version must be the one the packets carry
+                raise ProtocolError(
+                    "the server's version_information names another version"
+                )
             if self._handshake.early_data_accepted and self._peer is not None:
                 # RFC 9000 section 7.4.1: accepted 0-RTT data keeps the limits it was sent under
                 for parameter in EARLY_DATA_LIMITS:
@@ -981,9 +1050,15 @@ class QuicConnection:
         self._handshake_confirmed = True
         self._recovery.handshake_confirmed = True
         self._discard(EncryptionLevel.HANDSHAKE)
+        target = min(
+            PROBED_DATAGRAM_SIZE,
+            self._peer_parameter(Parameter.MAX_UDP_PAYLOAD_SIZE, 65527),
+        )
+        if target > self._datagram_size:
+            self._mtu_probe = target
 
     def _discard(self, level: EncryptionLevel) -> None:
-        _ = self._keys.pop(level, None)
+        self._keys.pop(level, None)
         self._recovery.discard_space(level)
         self._crypto_send[level].pending.clear()
         self._pending[level].clear()
@@ -991,10 +1066,22 @@ class QuicConnection:
     def _peer_parameter(self, parameter: Parameter, default: int) -> int:
         return default if self._peer is None else self._peer.integer(parameter, default)
 
+    def _switch_version(self, version: int) -> None:
+        # RFC 9368 section 2.3: the server answered in another version we offered; the Initial keys follow it,
+        # derived from the id the first flight went to, not from the id the server has chosen since
+        self._version = QuicVersion(version)
+        chosen = (
+            self._original_destination
+            if self._retry_source is None
+            else self._retry_source
+        )
+        send, receive = PacketProtection.initial(self._version, chosen)
+        self._keys[EncryptionLevel.INITIAL] = (receive, send)
+
     def _on_version_negotiation(self, header: Header) -> None:
         if self._version in header.supported_versions or self._handshake_done:
             return
-        for candidate in VERSIONS:
+        for candidate in QuicVersion:
             if candidate in header.supported_versions and candidate != self._version:
                 self._terminated = True
                 self._events.append(VersionNegotiated(candidate))
@@ -1032,8 +1119,29 @@ class QuicConnection:
         self._requeue_early_packets()
 
     def _build_datagram(self, now: float) -> bytes | None:
+        if self._mtu_probe is not None:
+            keys = self._keys.get(EncryptionLevel.APPLICATION)
+            if (
+                keys is not None
+                and keys[1] is not None
+                and self._recovery.can_send(self._mtu_probe)
+            ):
+                # RFC 9000 section 14.2.1: a padded PING in a datagram of its own asks the path whether it carries the size
+                target, self._mtu_probe = self._mtu_probe, None
+                built = self._build_packet(
+                    EncryptionLevel.APPLICATION,
+                    keys[1],
+                    target,
+                    now,
+                    pad=True,
+                    frames=(Ping(),),
+                    probe=True,
+                )
+                if built is not None:
+                    self._recovery.on_packet_sent(EncryptionLevel.APPLICATION, built[1])
+                    return built[0]
         packets: list[tuple[EncryptionLevel, bytes, SentPacket]] = []
-        remaining = DATAGRAM_SIZE
+        remaining = self._datagram_size
         for level in (
             EncryptionLevel.INITIAL,
             EncryptionLevel.EARLY_DATA,
@@ -1091,6 +1199,7 @@ class QuicConnection:
         *,
         pad: bool,
         frames: tuple[Frame, ...] | None = None,
+        probe: bool = False,
     ) -> tuple[bytes, SentPacket] | None:
         space = self._recovery.space(self._space_of(level))
         number = space.next_number
@@ -1106,34 +1215,38 @@ class QuicConnection:
         )
         if not collected:
             return None
-        writer = Writer()
-        for frame in collected:
-            writer.frame(frame)
-        if pad and len(writer) < capacity:
-            collected.append(Padding(capacity - len(writer)))
-            writer.frame(collected[-1])
-        if len(writer) + len(number_bytes) < 4:
-            padding = Padding(4 - len(writer) - len(number_bytes))
-            collected.append(padding)
-            writer.frame(padding)
-        payload = writer.finish()
+        if len(collected) == 1 and isinstance(collected[0], Stream) and not pad:
+            # a packet of one STREAM frame, the shape of every packet in an upload, needs no writer
+            payload = Writer.stream_frame(collected[0])
+        else:
+            writer = Writer()
+            for frame in collected:
+                writer.frame(frame)
+            if pad and len(writer) < capacity:
+                collected.append(Padding(capacity - len(writer)))
+                writer.frame(collected[-1])
+            if len(writer) + len(number_bytes) < 4:
+                padding = Padding(4 - len(writer) - len(number_bytes))
+                collected.append(padding)
+                writer.frame(padding)
+            payload = writer.finish()
         header = self._header(level, number_bytes, len(payload) + TAG_LENGTH)
         sealed = keys.seal(number, header, payload)
-        mask = keys.mask(
-            sealed[4 - len(number_bytes) : 4 - len(number_bytes) + SAMPLE_LENGTH]
-        )
-        protected = bytearray(header)
-        protected[0] ^= mask[0] & (0x0F if header[0] & 0x80 else 0x1F)
-        for index in range(len(number_bytes)):
-            protected[len(header) - len(number_bytes) + index] ^= mask[1 + index]
-        packet = bytes(protected) + sealed
+        length = len(number_bytes)
+        mask = keys.mask(sealed[4 - length : 4 - length + SAMPLE_LENGTH])
+        first = header[0] ^ (mask[0] & (0x0F if header[0] & 0x80 else 0x1F))
+        masked_number = (
+            int.from_bytes(number_bytes) ^ int.from_bytes(mask[1 : 1 + length])
+        ).to_bytes(length)
+        packet = bytes((first,)) + header[1:-length] + masked_number + sealed
         space.next_number += 1
-        ack_eliciting = any(
-            not isinstance(frame, ACK_ELICITING_EXCLUSIONS) for frame in collected
-        )
-        in_flight = ack_eliciting or any(
-            isinstance(frame, Padding) for frame in collected
-        )
+        ack_eliciting = in_flight = False
+        for frame in collected:
+            if not isinstance(frame, ACK_ELICITING_EXCLUSIONS):
+                ack_eliciting = in_flight = True
+                break
+            if isinstance(frame, Padding):
+                in_flight = True
         return packet, SentPacket(
             number,
             now,
@@ -1142,6 +1255,7 @@ class QuicConnection:
             len(packet),
             tuple(collected),
             level is EncryptionLevel.EARLY_DATA,
+            probe,
         )
 
     def _collect_frames(
@@ -1168,7 +1282,7 @@ class QuicConnection:
                 space.ack_pending = False
                 space.ack_eliciting_received = 0
         if self._probe_levels and self._probe_levels[0] is level:
-            _ = self._probe_levels.popleft()
+            self._probe_levels.popleft()
             frames.append(Ping())
             used += 1
         pending = self._pending[self._space_of(level)]
@@ -1284,6 +1398,16 @@ class QuicConnection:
 
     @staticmethod
     def _frame_length(frame: Frame) -> int:
+        if isinstance(frame, Stream):
+            # the common frame is sized without encoding its data twice
+            size = len(frame.data)
+            return (
+                1
+                + Writer.varint_length(frame.stream_id)
+                + (Writer.varint_length(frame.offset) if frame.offset else 0)
+                + Writer.varint_length(size)
+                + size
+            )
         writer = Writer()
         writer.frame(frame)
         return len(writer)

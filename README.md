@@ -29,7 +29,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Certificates are checked against the system trust store, or against `trust_store=TrustStore.from_file(...)` from `ssl2`; `verify=False` turns the check off for a test server. Revocation is not checked, as curl does not without `--cert-status`. Headers go on the wire in the order given, client headers first and then the request's own. `Host` leads an HTTP/1.1 request; HTTP/2 and HTTP/3 lowercase the names and drop the connection-specific ones, nothing else changes. `params`, `json`, `data`, `content`, `files`, `auth` and `cookies` are accepted by `get`, `post`, `put`, `patch`, `delete`, `head`, `options` and `request`.
+Certificates are checked against the system trust store, or against `trust_store=TrustStore.from_file(...)` from `ssl2`; `verify=False` turns the check off for a test server. Revocation is checked against the CRL the certificate names: fetched over HTTP, verified with the issuer from the chain, cached until its next update, and a listed certificate is refused with `RevocationError`. `revocation=Revocation.STRICT` also refuses when no valid CRL can be had, `Revocation.NONE` skips the check, and the default `Revocation.SOFT` lets such a connection through, as browsers do. The check covers the origin's certificate and an HTTPS proxy's own certificate on a plain-HTTP request through it; the proxy's certificate on a TLS tunnel is verified but not checked for revocation. Headers go on the wire in the order given, client headers first and then the request's own. `Host` leads an HTTP/1.1 request; HTTP/2 and HTTP/3 lowercase the names and drop the connection-specific ones, nothing else changes. `params`, `json`, `data`, `content`, `files`, `auth` and `cookies` are accepted by `get`, `post`, `put`, `patch`, `delete`, `head`, `options` and `request`.
 
 ## Responses
 
@@ -86,7 +86,7 @@ A single number sets every phase and the total, so the request gives up after th
 ```python
 import asyncio
 
-from boring_http import QUIC_V2, Client, Http3Profile
+from boring_http import Client, Http3Profile, QuicVersion
 
 
 async def main() -> None:
@@ -95,7 +95,7 @@ async def main() -> None:
         second = await client.get("https://pingly.us.kg/api/all")
         print(first.version, second.version)  # h2 h3, the Alt-Svc header taught the client that this origin speaks HTTP/3
 
-    async with Client(versions=("h3",), http3=Http3Profile(quic_version=QUIC_V2)) as client:
+    async with Client(versions=("h3",), http3=Http3Profile(quic_version=QuicVersion.V2)) as client:
         response = await client.get("https://pingly.us.kg/api/all")
         print(response.version, response.json()["http_version"])  # h3 HTTP/3.0
 
@@ -103,7 +103,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-The default is `versions=("h2", "h1")`. With `"h3"` in the list the client switches an origin to QUIC after an `Alt-Svc: h3` header and falls back to TCP when the QUIC route stops answering; `versions=("h3",)` goes straight to QUIC. QUIC v1 is the default; `quic_version=QUIC_V2` asks for v2 from the first packet, which aioquic, ngtcp2, quic-go, haproxy and nginx answer or negotiate down, while Cloudflare's servers answer a v2 Initial with nothing at all and the attempt times out. Retry packets, version negotiation, loss recovery, pacing, flow control, key updates, QPACK with a 64 KiB dynamic table on the decoding side and 0-RTT are handled; connection migration is not. A second connection to an origin resumes the TLS session and sends GET, HEAD and OPTIONS requests before the handshake has finished, under the limits and SETTINGS the server gave last time; other methods wait for the handshake, a 425 answer is retried after it, and a server that declines the early data gets it again under the 1-RTT keys. The transport parameters are Chrome 155's set, in a fresh random order with a GREASE entry, a GREASE version, Chrome's connection options and, on a resumed connection, the round trip time measured last time; `TransportParameters` on the `Http3Profile` changes any of it. The control stream carries SETTINGS with a GREASE entry, a GREASE frame, and a PRIORITY_UPDATE for every request that has a `priority` header, as Chrome sends them.
+The default is `versions=("h2", "h1")`. With `"h3"` in the list the client switches an origin to QUIC after an `Alt-Svc: h3` header and falls back to TCP when the QUIC route stops answering; `versions=("h3",)` goes straight to QUIC. QUIC v1 is the default; `quic_version=QuicVersion.V2` offers v2 through compatible version negotiation (RFC 9368), so the first packet is still v1 and a server that speaks v2, such as aioquic, ngtcp2, haproxy or haskell quic, switches to it, while every other server simply stays on v1. Retry packets, version negotiation, loss recovery, pacing, flow control, key updates, path MTU probing from 1200 up to 1452 bytes with the don't-fragment flag set, QPACK with a 64 KiB dynamic table on the decoding side and 0-RTT are handled; connection migration is not. A second connection to an origin resumes the TLS session and sends GET, HEAD and OPTIONS requests before the handshake has finished, under the limits and SETTINGS the server gave last time; other methods wait for the handshake, a 425 answer is retried after it, and a server that declines the early data gets it again under the 1-RTT keys. The transport parameters are Chrome 155's set, in a fresh random order with a GREASE entry, a GREASE version, Chrome's connection options and, on a resumed connection, the round trip time measured last time; `TransportParameters` on the `Http3Profile` changes any of it. The control stream carries SETTINGS with a GREASE entry, a GREASE frame, and a PRIORITY_UPDATE for every request that has a `priority` header, as Chrome sends them.
 
 ## Proxies
 
@@ -142,7 +142,7 @@ asyncio.run(main())
 ```python
 import asyncio
 
-from boring_http import CHROME, Client
+from boring_http import CHROME_HTTP2, Client
 from ssl2 import (
     JA4,
     CertificateCompressionAlgorithm,
@@ -217,10 +217,10 @@ profile = (
 
 
 async def main() -> None:
-    async with Client(tls=profile, http2=CHROME) as client:
+    async with Client(tls=profile, http2=CHROME_HTTP2) as client:
         report = (await client.get("https://pingly.us.kg/api/all")).json()
         print(report["tls"]["ja4"] == JA4.of(profile).text, report["tls"]["ja4"])  # True t13d1516h2_8daaf6152771_d8a2da3f94cd
-        print(report["http2"]["akamai_fingerprint"] == CHROME.fingerprint.text, report["http2"]["akamai_fingerprint"])  # True 1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p
+        print(report["http2"]["akamai_fingerprint"] == CHROME_HTTP2.fingerprint.text, report["http2"]["akamai_fingerprint"])  # True 1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p
 
 
 asyncio.run(main())
@@ -302,7 +302,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`tls` is a `ssl2.ClientHello`; BoringSSL sends it byte for byte or the client refuses it with the reason. `http2` is an `Http2Profile` with the SETTINGS, WINDOW_UPDATE, priorities and pseudo-header order; `CHROME` is the default. `http3` is an `Http3Profile` with the HTTP/3 SETTINGS, QUIC transport parameters and QUIC version.
+`tls` is a `ssl2.ClientHello`; BoringSSL sends it byte for byte or the client refuses it with the reason. `http2` is an `Http2Profile` with the SETTINGS, WINDOW_UPDATE, priorities and pseudo-header order; `CHROME_HTTP2` is the default. `http3` is an `Http3Profile` with the HTTP/3 SETTINGS, QUIC transport parameters and QUIC version; `CHROME_HTTP3` is the default.
 
 ## WebSocket
 
@@ -353,17 +353,17 @@ Against a Go server (net/http and quic-go) on loopback, so the server is never t
 
 | scenario    | boring-http | boring-http+uvloop |  wreq | curl_cffi | pycurl | httpx | aiohttp | requests |
 | ----------- | ----------: | -----------------: | ----: | --------: | -----: | ----: | ------: | -------: |
-| h1-seq      |        9079 |              13405 | 17190 |      6116 |  28775 |  2171 |   11796 |     3287 |
-| h2-seq      |        5744 |               5931 | 12384 |      4767 |  15384 |  1808 |       - |        - |
-| h3-seq      |        4021 |               4537 |     - |      4595 |  12410 |     - |       - |        - |
-| h1-conc     |        8956 |              12148 | 53500 |      7324 |  31170 |   934 |   23259 |     2361 |
-| h2-conc     |       14846 |              15584 | 48788 |     10683 |  28764 |  2066 |       - |        - |
-| h3-conc     |        6855 |               6901 |     - |     11079 |  29305 |     - |       - |        - |
-| h1-download |         658 |                645 |   689 |       793 |   1019 |   264 |    1117 |      658 |
-| h2-download |         472 |                497 |   426 |       468 |    479 |   123 |       - |        - |
-| h3-download |         105 |                107 |     - |       517 |    492 |     - |       - |        - |
-| h1-upload   |         633 |                687 |  3687 |      2002 |   2124 |   675 |     749 |     2296 |
-| h2-upload   |         447 |                480 |  2309 |      1375 |   1440 |   197 |       - |        - |
-| h3-upload   |          63 |                 67 |     - |       906 |    411 |     - |       - |        - |
+| h1-seq      |       14713 |              14354 | 20116 |      6042 |  29137 |  2248 |   11831 |     3539 |
+| h2-seq      |        7307 |               7359 | 13404 |      5096 |  16023 |  1880 |       - |        - |
+| h3-seq      |        4679 |               4308 |     - |      4725 |  14041 |     - |       - |        - |
+| h1-conc     |       11594 |              12391 | 61212 |      7443 |  33861 |   939 |   24836 |     2438 |
+| h2-conc     |       19234 |              20085 | 41075 |     11354 |  30053 |  2164 |       - |        - |
+| h3-conc     |       10121 |               9788 |     - |     11447 |  29598 |     - |       - |        - |
+| h1-download |         734 |                772 |   823 |       767 |   1229 |   257 |    1081 |      594 |
+| h2-download |         319 |                303 |   443 |       466 |    484 |   120 |       - |        - |
+| h3-download |         199 |                207 |     - |       542 |    491 |     - |       - |        - |
+| h1-upload   |        2513 |               3093 |  3276 |      2106 |   1998 |   694 |     713 |     2376 |
+| h2-upload   |         786 |                839 |  2206 |      1085 |   1323 |   186 |       - |        - |
+| h3-upload   |         132 |                132 |     - |       819 |    434 |     - |       - |        - |
 
 HTTP/1.1 and HTTP/2 are Python framing over BoringSSL records; HTTP/3 is a QUIC stack written in Python with BoringSSL doing the cryptography, which is where the gap to libcurl's HTTP/3 comes from. The same code holds 1000 open clients per protocol, 20000 requests with 256 in flight, parallel multi-megabyte transfers and 5% datagram loss on the QUIC path.

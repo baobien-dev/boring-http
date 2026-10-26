@@ -2,10 +2,9 @@ import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import Self, final
+from typing import Self
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class Cookie:
     name: str
@@ -86,7 +85,6 @@ class Cookie:
             return None
 
 
-@final
 class CookieJar:
     def __init__(self) -> None:
         self._cookies: dict[tuple[str, str, str], Cookie] = {}
@@ -106,7 +104,7 @@ class CookieJar:
     def set(self, cookie: Cookie) -> None:
         key = (cookie.domain, cookie.path, cookie.name)
         if cookie.expired:
-            _ = self._cookies.pop(key, None)
+            self._cookies.pop(key, None)
         else:
             self._cookies[key] = cookie
 

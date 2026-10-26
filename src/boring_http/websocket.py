@@ -4,7 +4,7 @@ import os
 import secrets
 import struct
 from enum import IntEnum
-from typing import Final, Self, final
+from typing import Self
 
 from ssl2 import AsyncTransport
 
@@ -12,8 +12,8 @@ from boring_http.errors import ProtocolError, WebSocketClosed
 from boring_http.message import Headers
 from boring_http.timing import Deadline
 
-GUID: Final = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-VERSION: Final = "13"
+GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+VERSION = "13"
 
 
 class Opcode(IntEnum):
@@ -25,7 +25,6 @@ class Opcode(IntEnum):
     PONG = 0xA
 
 
-@final
 class WebSocket:
     def __init__(
         self,

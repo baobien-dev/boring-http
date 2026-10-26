@@ -1,5 +1,4 @@
 from collections.abc import AsyncGenerator, Callable
-from typing import Final, final
 
 from ssl2 import AsyncTransport
 
@@ -7,12 +6,11 @@ from boring_http.errors import ProtocolError, RemoteDisconnected
 from boring_http.message import Headers, HTTPVersion, Request, Response
 from boring_http.timing import Deadline
 
-READ_SIZE: Final = 65536
-HEAD_LIMIT: Final = 65536
-LINE_LIMIT: Final = 8192
+READ_SIZE = 65536
+HEAD_LIMIT = 65536
+LINE_LIMIT = 8192
 
 
-@final
 class Http1Connection:
     def __init__(
         self,
@@ -176,7 +174,15 @@ class Http1Connection:
                 while piece := await self._read_some(READ_SIZE, deadline):
                     yield piece
             else:
-                async for piece in self._exactly(length, deadline):
+                # the usual body, with a Content-Length, is read here without a second generator in the chain
+                remaining = length
+                while remaining:
+                    piece = await self._read_some(remaining, deadline)
+                    if not piece:
+                        raise ProtocolError(
+                            f"the connection closed with {remaining} body bytes missing"
+                        )
+                    remaining -= len(piece)
                     yield piece
         except BaseException:
             await self.close()

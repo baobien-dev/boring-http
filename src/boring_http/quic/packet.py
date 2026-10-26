@@ -1,15 +1,14 @@
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Final, final
+
+from boring_ssl2 import QuicVersion
 
 from boring_http.errors import ProtocolError
 
-QUIC_V1: Final = 0x00000001
-QUIC_V2: Final = 0x6B3343CF
-FORM_LONG: Final = 0x80
-FIXED_BIT: Final = 0x40
-KEY_PHASE_BIT: Final = 0x04
-MAX_CONNECTION_ID: Final = 20
+FORM_LONG = 0x80
+FIXED_BIT = 0x40
+KEY_PHASE_BIT = 0x04
+MAX_CONNECTION_ID = 20
 
 
 class PacketType(IntEnum):
@@ -20,21 +19,29 @@ class PacketType(IntEnum):
     ONE_RTT = 4
     VERSION_NEGOTIATION = 5
 
+    def code(self, version: QuicVersion) -> int:
+        return self.long_types(version).index(self)
 
-LONG_TYPE_CODES: Final = {
-    QUIC_V1: {
-        PacketType.INITIAL: 0,
-        PacketType.ZERO_RTT: 1,
-        PacketType.HANDSHAKE: 2,
-        PacketType.RETRY: 3,
-    },
-    QUIC_V2: {
-        PacketType.INITIAL: 1,
-        PacketType.ZERO_RTT: 2,
-        PacketType.HANDSHAKE: 3,
-        PacketType.RETRY: 0,
-    },
-}
+    @classmethod
+    def long(cls, version: QuicVersion, code: int) -> PacketType:
+        return cls.long_types(version)[code]
+
+    @staticmethod
+    def long_types(version: QuicVersion) -> tuple[PacketType, ...]:
+        # RFC 9369 section 3.2: v2 rotates the long header type values of v1
+        if version is QuicVersion.V1:
+            return (
+                PacketType.INITIAL,
+                PacketType.ZERO_RTT,
+                PacketType.HANDSHAKE,
+                PacketType.RETRY,
+            )
+        return (
+            PacketType.RETRY,
+            PacketType.INITIAL,
+            PacketType.ZERO_RTT,
+            PacketType.HANDSHAKE,
+        )
 
 
 class FrameType(IntEnum):
@@ -87,19 +94,16 @@ class TransportError(IntEnum):
     CRYPTO_ERROR = 0x100
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class Padding:
     count: int
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class Ping:
     pass
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class Ack:
     largest: int
@@ -108,7 +112,6 @@ class Ack:
     ecn: tuple[int, int, int] | None = None
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class ResetStream:
     stream_id: int
@@ -116,27 +119,23 @@ class ResetStream:
     final_size: int
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class StopSending:
     stream_id: int
     error: int
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class Crypto:
     offset: int
     data: bytes
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class NewToken:
     token: bytes
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class Stream:
     stream_id: int
@@ -145,47 +144,40 @@ class Stream:
     fin: bool
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class MaxData:
     maximum: int
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class MaxStreamData:
     stream_id: int
     maximum: int
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class MaxStreams:
     bidirectional: bool
     maximum: int
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class DataBlocked:
     limit: int
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class StreamDataBlocked:
     stream_id: int
     limit: int
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class StreamsBlocked:
     bidirectional: bool
     limit: int
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class NewConnectionId:
     sequence: int
@@ -194,25 +186,21 @@ class NewConnectionId:
     reset_token: bytes
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class RetireConnectionId:
     sequence: int
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class PathChallenge:
     data: bytes
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class PathResponse:
     data: bytes
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class ConnectionClose:
     error: int
@@ -221,13 +209,11 @@ class ConnectionClose:
     application: bool
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class HandshakeDone:
     pass
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class Datagram:
     data: bytes
@@ -256,47 +242,47 @@ type Frame = (
     | HandshakeDone
     | Datagram
 )
-ACK_ELICITING_EXCLUSIONS: Final = (Ack, Padding, ConnectionClose)
+ACK_ELICITING_EXCLUSIONS = (Ack, Padding, ConnectionClose)
 
 
-@final
 class Reader:
     def __init__(self, data: bytes, position: int = 0) -> None:
         self._data = data
+        self._end = len(data)
         self.position = position
 
     @property
     def remaining(self) -> int:
-        return len(self._data) - self.position
+        return self._end - self.position
 
     def byte(self) -> int:
-        if self.position >= len(self._data):
+        if self.position >= self._end:
             raise ProtocolError("packet ended inside a field")
         value = self._data[self.position]
         self.position += 1
         return value
 
     def take(self, length: int) -> bytes:
-        if length > self.remaining:
+        position = self.position
+        if position + length > self._end:
             raise ProtocolError("packet ended inside a field")
-        value = self._data[self.position : self.position + length]
-        self.position += length
-        return value
+        self.position = position + length
+        return self._data[position : position + length]
 
     def varint(self) -> int:
-        data, position = self._data, self.position
-        if position >= len(data):
+        position = self.position
+        if position >= self._end:
             raise ProtocolError("packet ended inside a field")
-        first = data[position]
+        first = self._data[position]
         length = 1 << (first >> 6)
         if length == 1:
             self.position = position + 1
             return first & 0x3F
         end = position + length
-        if end > len(data):
+        if end > self._end:
             raise ProtocolError("packet ended inside a field")
         self.position = end
-        return int.from_bytes(data[position:end], "big") & ((1 << (8 * length - 2)) - 1)
+        return int.from_bytes(self._data[position:end]) & ((1 << (8 * length - 2)) - 1)
 
     def rest(self) -> bytes:
         return self.take(self.remaining)
@@ -393,7 +379,6 @@ class Reader:
                 raise ProtocolError(f"unknown QUIC frame type {kind:#x}")
 
 
-@final
 class Writer:
     def __init__(self) -> None:
         self._data = bytearray()
@@ -419,6 +404,14 @@ class Writer:
         return bytes(self._data)
 
     @staticmethod
+    def varint_length(value: int) -> int:
+        if value < 0x40:
+            return 1
+        if value < 0x4000:
+            return 2
+        return 4 if value < 0x40000000 else 8
+
+    @staticmethod
     def encode_varint(value: int) -> bytes:
         if value < 0x40:
             return bytes((value,))
@@ -430,8 +423,27 @@ class Writer:
             return (value | 0xC000000000000000).to_bytes(8, "big")
         raise ValueError(f"{value} does not fit a QUIC varint")
 
+    @classmethod
+    def stream_frame(cls, frame: Stream) -> bytes:
+        # the frame a transfer repeats thousands of times, built as bytes without the growing buffer
+        encode = cls.encode_varint
+        return (
+            encode(
+                FrameType.STREAM
+                | 0x02
+                | (0x04 if frame.offset else 0)
+                | (0x01 if frame.fin else 0)
+            )
+            + encode(frame.stream_id)
+            + (encode(frame.offset) if frame.offset else b"")
+            + encode(len(frame.data))
+            + frame.data
+        )
+
     def frame(self, frame: Frame) -> None:
         match frame:
+            case Stream():
+                self._data += self.stream_frame(frame)
             case Padding(count):
                 self._data += bytes(count)
             case Ping():
@@ -468,18 +480,6 @@ class Writer:
                 self.varint(FrameType.NEW_TOKEN)
                 self.varint(len(token))
                 self._data += token
-            case Stream(stream_id, offset, data, fin):
-                self.varint(
-                    FrameType.STREAM
-                    | 0x02
-                    | (0x04 if offset else 0)
-                    | (0x01 if fin else 0)
-                )
-                self.varint(stream_id)
-                if offset:
-                    self.varint(offset)
-                self.varint(len(data))
-                self._data += data
             case MaxData(maximum):
                 self.varint(FrameType.MAX_DATA)
                 self.varint(maximum)
@@ -542,7 +542,6 @@ class Writer:
                 self._data += data
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class Header:
     packet_type: PacketType
@@ -582,12 +581,11 @@ class Header:
                 len(data),
                 tuple(versions),
             )
-        codes = LONG_TYPE_CODES.get(version)
-        if codes is None:
-            raise ProtocolError(f"unknown QUIC version {version:#010x}")
-        packet_type = next(
-            kind for kind, code in codes.items() if code == (first >> 4) & 0x03
-        )
+        try:
+            quic_version = QuicVersion(version)
+        except ValueError:
+            raise ProtocolError(f"unknown QUIC version {version:#010x}") from None
+        packet_type = PacketType.long(quic_version, (first >> 4) & 0x03)
         if packet_type is PacketType.RETRY:
             body = reader.rest()
             return cls(
@@ -616,7 +614,7 @@ class Header:
     @staticmethod
     def build(
         packet_type: PacketType,
-        version: int,
+        version: QuicVersion,
         destination: bytes,
         source: bytes,
         token: bytes,
@@ -624,10 +622,7 @@ class Header:
         payload_length: int,
     ) -> bytes:
         first = (
-            FORM_LONG
-            | FIXED_BIT
-            | (LONG_TYPE_CODES[version][packet_type] << 4)
-            | (len(number) - 1)
+            FORM_LONG | FIXED_BIT | (packet_type.code(version) << 4) | (len(number) - 1)
         )
         head = (
             bytes((first,))
