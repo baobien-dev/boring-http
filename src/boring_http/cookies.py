@@ -7,14 +7,6 @@ from typing import Self
 from boring_http.public_suffixes import EXCEPTIONS, RULES
 
 
-def is_public_suffix(domain: str) -> bool:
-    # publicsuffix.org's algorithm: an exception rule wins, then a listed rule or a wildcard over the parent, and an unlisted top-level label is one
-    if domain in EXCEPTIONS:
-        return False
-    parent = domain.partition(".")[2]
-    return domain in RULES or f"*.{parent}" in RULES or not parent
-
-
 @dataclass(frozen=True, slots=True)
 class Cookie:
     name: str
@@ -57,7 +49,7 @@ class Cookie:
         if domain and not (host == domain or host.endswith("." + domain)):
             return None
         # RFC 6265 section 5.3 step 5: a public suffix as Domain is refused, unless it is the host itself, which keeps the cookie to that host
-        if domain and is_public_suffix(domain):
+        if domain and cls._public_suffix(domain):
             if domain != host:
                 return None
             domain = ""
@@ -91,6 +83,14 @@ class Cookie:
         return (
             domain_ok and path_ok and (secure or not self.secure) and not self.expired
         )
+
+    @staticmethod
+    def _public_suffix(domain: str) -> bool:
+        # publicsuffix.org's algorithm: an exception rule wins, then a listed rule or a wildcard over the parent, and an unlisted top-level label is one
+        if domain in EXCEPTIONS:
+            return False
+        parent = domain.partition(".")[2]
+        return domain in RULES or f"*.{parent}" in RULES or not parent
 
     @staticmethod
     def _date(text: str) -> float | None:

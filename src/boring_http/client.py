@@ -1,5 +1,12 @@
 import base64
-from collections.abc import AsyncGenerator, AsyncIterable, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterable,
+    Awaitable,
+    Callable,
+    Mapping,
+    Sequence,
+)
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from time import monotonic
@@ -16,6 +23,7 @@ from ssl2 import (
     ProxyError,
     ProxyScheme,
     SessionCache,
+    SigningChain,
     SocketTransport,
     TLSClientConfiguration,
     TLSError,
@@ -107,10 +115,13 @@ class Client:
         trust_store: TrustStore | None = None,
         verify: bool = True,
         revocation: Revocation = Revocation.SOFT,
+        certificate_chain: SigningChain | None = None,
+        check_peer: Callable[[tuple[bytes, ...], str], Awaitable[None]] | None = None,
         cookies: CookieJar | None = None,
         base_url: str | None = None,
         max_connections: int = 100,
         max_connections_per_host: int = 10,
+        max_idle_time: float | None = 90.0,
         max_redirects: int = 20,
         max_message_size: int = 16 * 1024 * 1024,
         decode: bool = True,
@@ -138,13 +149,17 @@ class Client:
         self._trust_store = trust_store
         self._verify = verify
         self._revocations = Revocations(revocation, self._fetch_crl)
+        self._certificate_chain = certificate_chain
+        self._check_peer = check_peer
         self._base_url = base_url
         self._max_redirects = max_redirects
         self._max_message_size = max_message_size
         self._decode = decode
         self._contexts: dict[tuple[NextProtocol, ...] | None, ClientContext] = {}
         self._memory: dict[tuple[str, int], OriginMemory] = {}
-        self._pool = Pool(self._connect, max_connections, max_connections_per_host)
+        self._pool = Pool(
+            self._connect, max_connections, max_connections_per_host, max_idle_time
+        )
         self.cookies = CookieJar() if cookies is None else cookies
 
     async def __aenter__(self) -> Self:
@@ -442,12 +457,14 @@ class Client:
                     ALPN[version] for version in self._versions if version in ALPN
                 )
                 configuration = TLSClientConfiguration(
+                    certificate_chain=self._certificate_chain,
                     trust_store=self._trust_store,
                     inner_protocols=offered,
                     verify_certificates=self._verify,
                 )
             else:
                 configuration = TLSClientConfiguration(
+                    certificate_chain=self._certificate_chain,
                     trust_store=self._trust_store,
                     client_hello=hello,
                     verify_certificates=self._verify,
@@ -487,10 +504,15 @@ class Client:
 
     async def _checked(self, stream: TLSStream, authority: str) -> None:
         try:
-            await self._revocations.check(stream.buffer.getpeerchain(), authority)
-        except RevocationError:
+            await self._verified(stream.buffer.getpeerchain(), authority)
+        except BaseException:
             await stream.close()
             raise
+
+    async def _verified(self, chain: tuple[bytes, ...], authority: str) -> None:
+        await self._revocations.check(chain, authority)
+        if self._check_peer is not None:
+            await self._check_peer(chain, authority)
 
     async def _fetch_crl(self, url: str) -> bytes:
         async with Client(
@@ -519,10 +541,8 @@ class Client:
                     memory=memory,
                 )
                 try:
-                    await self._revocations.check(
-                        client.connection.peer_chain, url.authority
-                    )
-                except RevocationError:
+                    await self._verified(client.connection.peer_chain, url.authority)
+                except BaseException:
                     client.close()
                     raise
                 connection = Http3Connection(client, self._http3, memory)
