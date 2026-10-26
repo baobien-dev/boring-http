@@ -1,4 +1,5 @@
 import base64
+import os
 from collections.abc import (
     AsyncGenerator,
     AsyncIterable,
@@ -117,6 +118,8 @@ class Client:
         revocation: Revocation = Revocation.SOFT,
         certificate_chain: SigningChain | None = None,
         check_peer: Callable[[tuple[bytes, ...], str], Awaitable[None]] | None = None,
+        key_log: str | os.PathLike[str] | None = None,
+        resolve: Mapping[tuple[str, int], tuple[str, int]] | None = None,
         cookies: CookieJar | None = None,
         base_url: str | None = None,
         max_connections: int = 100,
@@ -151,6 +154,8 @@ class Client:
         self._revocations = Revocations(revocation, self._fetch_crl)
         self._certificate_chain = certificate_chain
         self._check_peer = check_peer
+        self._key_log = key_log
+        self._resolve = {} if resolve is None else dict(resolve)
         self._base_url = base_url
         self._max_redirects = max_redirects
         self._max_message_size = max_message_size
@@ -475,7 +480,7 @@ class Client:
                 else None
             )
             self._contexts[protocols] = ClientContext(
-                configuration, session_cache=cache
+                configuration, session_cache=cache, key_log=self._key_log
             )
         return self._contexts[protocols]
 
@@ -528,13 +533,19 @@ class Client:
         *,
         http1_only: bool = False,
     ) -> Connection:
+        # a resolve= entry sends a direct connection elsewhere, while the URL's host stays the name sent and verified
+        address = (
+            self._resolve.get(url.address, url.address)
+            if proxy is None
+            else url.address
+        )
         try:
             if quic and self._http3 is not None:
                 memory = self._memory.setdefault(url.address, OriginMemory())
                 client = await QuicClient.connect(
                     self._context((NextProtocol.H3,)),
                     url.host,
-                    url.address,
+                    address,
                     self._http3.transport,
                     version=self._http3.quic_version,
                     proxy=proxy,
@@ -551,11 +562,12 @@ class Client:
             if url.secure:
                 stream = await TLSStream.connect(
                     self._context((NextProtocol.HTTP1,) if http1_only else None),
-                    url.address,
+                    address,
                     proxy=proxy,
                     proxy_context=self._context((NextProtocol.HTTP1,))
                     if proxy is not None and proxy.scheme is ProxyScheme.HTTPS
                     else None,
+                    server_hostname=url.host,
                 )
                 await self._checked(stream, url.authority)
                 if (
@@ -587,7 +599,7 @@ class Client:
                 return Http1Connection(
                     transport, absolute_form=True, proxy_authorization=authorization
                 )
-            tunnel = await TLSStream.tunnel(self._context(), url.address, proxy)
+            tunnel = await TLSStream.tunnel(self._context(), address, proxy)
             return Http1Connection(tunnel.transport, leftover=tunnel.leftover)
         except ProxyError, ConfigurationError, RevocationError:
             raise
