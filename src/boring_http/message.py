@@ -419,6 +419,8 @@ class ConnectionInfo:
     cipher: CipherSuite | int | None = None
     peer_chain: tuple[bytes, ...] = ()
     reused: bool = False
+    # seconds spent opening the connection: TCP, proxy and the TLS or QUIC handshake
+    connect_time: float = 0.0
 
     @classmethod
     def of(

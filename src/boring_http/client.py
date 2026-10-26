@@ -640,7 +640,11 @@ class Client:
                 raise
             response.started = started
             response.elapsed = monotonic() - started
-            response.connection = replace(connection.info, reused=connection.reused)
+            response.connection = replace(
+                connection.info,
+                reused=connection.reused,
+                connect_time=connection.connect_time,
+            )
             return response
         raise HTTPError("unreachable")
 

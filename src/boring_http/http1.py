@@ -28,6 +28,7 @@ class Http1Connection:
         self.idle = True
         self.closed = False
         self.reused = False
+        self.connect_time = 0.0
         self.released: Callable[[], None] = self._nothing
 
     @property
@@ -72,11 +73,12 @@ class Http1Connection:
         try:
             async with deadline.phase("write"):
                 await self._transport.write("\r\n".join(lines).encode() + b"\r\n\r\n")
-                if request.body is not None:
-                    await self._write_body(
-                        request,
-                        headers.get("transfer-encoding", "").lower() == "chunked",
-                    )
+            if request.body is not None:
+                await self._write_body(
+                    request,
+                    headers.get("transfer-encoding", "").lower() == "chunked",
+                    deadline,
+                )
             status, reason, response_headers, old = await self._read_head(deadline)
         except BaseException:
             await self.close()
@@ -115,18 +117,22 @@ class Http1Connection:
             await self._transport.close()
             self.released()
 
-    async def _write_body(self, request: Request, chunked: bool) -> None:
+    async def _write_body(
+        self, request: Request, chunked: bool, deadline: Deadline
+    ) -> None:
         if request.body is None:
             return
+        # write limits each wait for the connection to take a chunk, not the whole body
         async for chunk in request.body.chunks():
-            if chunked:
+            async with deadline.phase("write"):
                 await self._transport.write(
                     f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n"
+                    if chunked
+                    else chunk
                 )
-            else:
-                await self._transport.write(chunk)
         if chunked:
-            await self._transport.write(b"0\r\n\r\n")
+            async with deadline.phase("write"):
+                await self._transport.write(b"0\r\n\r\n")
 
     async def _read_head(self, deadline: Deadline) -> tuple[int, str, Headers, bool]:
         while True:

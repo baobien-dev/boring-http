@@ -14,6 +14,7 @@ type Key = tuple[str, str, int, Proxy | None, bool]
 class Connection(Protocol):
     closed: bool
     reused: bool
+    connect_time: float
     released: Callable[[], None]
 
     @property
@@ -83,8 +84,10 @@ class Pool:
                 await limit.acquire()
                 await self._total.acquire()
             try:
+                started = monotonic()
                 async with deadline.phase("connect"):
                     connection = await self._connector(url, proxy, quic)
+                connection.connect_time = monotonic() - started
             except BaseException:
                 limit.release()
                 self._total.release()

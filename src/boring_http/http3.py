@@ -170,6 +170,7 @@ class Http3Connection:
         )
         self.closed = False
         self.reused = False
+        self.connect_time = 0.0
         self.released: Callable[[], None] = self._nothing
 
     @property
@@ -273,11 +274,12 @@ class Http3Connection:
             stream_id, self._frame(FrameType.HEADERS, block), end=request.body is None
         )
         if request.body is not None:
-            async with deadline.phase("write"):
-                async for chunk in request.body.chunks():
-                    self._quic.send(stream_id, self._frame(FrameType.DATA, chunk))
+            # write limits each wait for the stream to drain, not the whole body
+            async for chunk in request.body.chunks():
+                self._quic.send(stream_id, self._frame(FrameType.DATA, chunk))
+                async with deadline.phase("write"):
                     await self._quic.drain(stream_id, SEND_BUFFER)
-                self._quic.send(stream_id, b"", end=True)
+            self._quic.send(stream_id, b"", end=True)
         frames = StreamFrames(self._quic, stream_id, deadline)
         status, headers = await self._response_head(frames, stream_id)
         trailers = Headers()

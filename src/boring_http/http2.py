@@ -168,6 +168,7 @@ class Http2Connection:
         )
         self.closed = False
         self.reused = False
+        self.connect_time = 0.0
         self.released: Callable[[], None] = self._nothing
 
     @property
@@ -236,8 +237,8 @@ class Http2Connection:
         try:
             async with deadline.phase("write"):
                 await self._write_headers(stream.identifier, payload, flags)
-                if request.body is not None:
-                    await self._write_body(stream, request)
+            if request.body is not None:
+                await self._write_body(stream, request, deadline)
             async with deadline.phase("read"):
                 status, headers = await stream.headers
         except BaseException:
@@ -376,16 +377,21 @@ class Http2Connection:
             )
         await self._write(frames)
 
-    async def _write_body(self, stream: Http2Stream, request: Request) -> None:
+    async def _write_body(
+        self, stream: Http2Stream, request: Request, deadline: Deadline
+    ) -> None:
         if request.body is None:
             return
         remaining = request.body.length
+        # write limits each wait for window and socket to take a chunk, not the whole body
         async for chunk in request.body.chunks():
             if remaining is not None:
                 remaining -= len(chunk)
-            await self.write_data(stream, chunk, end=remaining == 0)
+            async with deadline.phase("write"):
+                await self.write_data(stream, chunk, end=remaining == 0)
         if remaining != 0:
-            await self.write_data(stream, b"", end=True)
+            async with deadline.phase("write"):
+                await self.write_data(stream, b"", end=True)
 
     async def _body(
         self, stream: Http2Stream, deadline: Deadline

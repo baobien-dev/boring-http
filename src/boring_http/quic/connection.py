@@ -1161,7 +1161,10 @@ class QuicConnection:
         self._destination_id = header.source
         send, receive = PacketProtection.initial(self._version, self._destination_id)
         self._keys[EncryptionLevel.INITIAL] = (receive, send)
+        # RFC 9000 section 17.2.5.3: the packets before the Retry are dropped, but their numbers are not used again
+        number = self._recovery.space(EncryptionLevel.INITIAL).next_number
         self._recovery.discard_space(EncryptionLevel.INITIAL)
+        self._recovery.space(EncryptionLevel.INITIAL).next_number = number
         self._crypto_send[EncryptionLevel.INITIAL] = SendStream(CRYPTO_STREAM, 1 << 62)
         self._crypto_send[EncryptionLevel.INITIAL].write(self._initial_hello)
         # the server dropped the 0-RTT packets along with the Initial; they go again with the new connection id

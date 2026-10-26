@@ -60,7 +60,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`response.cookies` holds only the cookies this response set; `client.cookies` is the jar that follows every request. A `Domain` that is a public suffix on the bundled Public Suffix List, such as `co.uk` or `github.io`, is refused unless it is the host itself, which then keeps the cookie to that host. `location`, `content_type`, `charset`, `content_length`, `content_encoding`, `retry_after`, `etag`, `last_modified` and `date` are parsed, `response.headers` keeps the raw fields in order, `raise_for_status()` raises `HTTPStatusError`. `response.connection` is a `ConnectionInfo` with the `local_address` and `remote_address` of the socket, the `tls_version`, `cipher` and `peer_chain` of its TLS or QUIC handshake, and whether the request `reused` a pooled connection.
+`response.cookies` holds only the cookies this response set; `client.cookies` is the jar that follows every request. A `Domain` that is a public suffix on the bundled Public Suffix List, such as `co.uk` or `github.io`, is refused unless it is the host itself, which then keeps the cookie to that host. `location`, `content_type`, `charset`, `content_length`, `content_encoding`, `retry_after`, `etag`, `last_modified` and `date` are parsed, `response.headers` keeps the raw fields in order, `raise_for_status()` raises `HTTPStatusError`. `response.connection` is a `ConnectionInfo` with the `local_address` and `remote_address` of the socket, the `tls_version`, `cipher` and `peer_chain` of its TLS or QUIC handshake, and whether the request `reused` a pooled connection. Its `connect_time` is the seconds spent opening that connection, the same on every request it serves, and `response.elapsed` the seconds from sending the request to its response headers.
 
 ## Streaming and timeouts
 
@@ -88,7 +88,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-A single number sets every phase and the total, so the request gives up after that many seconds whatever it was doing. With a `Timeout` the phases are separate: `connect` covers opening a connection, the proxy, TCP and the TLS or QUIC handshake included, `read` is the longest wait for the next bytes, `total` caps the whole exchange including redirects, and the error names whichever ran out.
+A single number sets every phase and the total, so the request gives up after that many seconds whatever it was doing. With a `Timeout` the phases are separate: `connect` covers opening a connection, the proxy, TCP and the TLS or QUIC handshake included, `read` is the longest wait for the next bytes, `write` the longest wait for the connection to take the next chunk of a body, `total` caps the whole exchange including redirects, and the error names whichever ran out.
 
 A body is held to what the application reads: over HTTP/2 and HTTP/3 the stream window opens again only as chunks are taken, so a response nobody reads stops at one window (`INITIAL_WINDOW_SIZE` or `initial_max_stream_data_bidi_local`), while the connection window keeps opening on arrival so other streams go on. An HTTP/3 upload keeps at most 1 MiB of the body unsent before it asks the body for the next chunk; HTTP/1.1 and HTTP/2 uploads wait on the socket and the peer's window.
 
