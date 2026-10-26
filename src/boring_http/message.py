@@ -18,6 +18,8 @@ from time import monotonic, time
 from typing import Self, cast, overload, override
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 
+from ssl2 import CipherSuite, TLSBuffer, TLSVersion
+
 from boring_http.codings import ContentDecoder
 from boring_http.cookies import Cookie
 from boring_http.errors import HTTPError
@@ -409,6 +411,35 @@ class Request:
         return wire
 
 
+@dataclass(frozen=True, slots=True)
+class ConnectionInfo:
+    local_address: tuple[str | None, int]
+    remote_address: tuple[str | None, int]
+    tls_version: TLSVersion | None = None
+    cipher: CipherSuite | int | None = None
+    peer_chain: tuple[bytes, ...] = ()
+    reused: bool = False
+
+    @classmethod
+    def of(
+        cls,
+        local_address: tuple[str | None, int],
+        remote_address: tuple[str | None, int],
+        buffer: TLSBuffer | None,
+    ) -> Self:
+        # an IPv6 socket address carries flow and scope fields after the host and port
+        local, remote = local_address[:2], remote_address[:2]
+        if buffer is None:
+            return cls(local, remote)
+        return cls(
+            local,
+            remote,
+            buffer.negotiated_tls_version,
+            buffer.cipher(),
+            buffer.getpeerchain(),
+        )
+
+
 class Response:
     def __init__(
         self,
@@ -429,6 +460,7 @@ class Response:
         self.request = request
         self.trailers = trailers
         self.history: tuple[Response, ...] = ()
+        self.connection: ConnectionInfo | None = None
         self.started = monotonic()
         self.elapsed = 0.0
         self._raw = raw

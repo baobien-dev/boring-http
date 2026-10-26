@@ -13,7 +13,7 @@ from boring_http.errors import (
     StreamRefused,
     StreamResetError,
 )
-from boring_http.message import Headers, HTTPVersion, Request, Response
+from boring_http.message import ConnectionInfo, Headers, HTTPVersion, Request, Response
 from boring_http.qpack import Qpack
 from boring_http.quic.connection import Parameter, TransportParameters
 from boring_http.quic.packet import Reader, Writer
@@ -184,6 +184,14 @@ class Http3Connection:
     @property
     def shared(self) -> bool:
         return True
+
+    @property
+    def info(self) -> ConnectionInfo:
+        return ConnectionInfo.of(
+            self._quic.getsockname(),
+            self._quic.getpeername(),
+            self._quic.connection.buffer,
+        )
 
     @property
     def connect_protocol(self) -> bool:
@@ -572,3 +580,9 @@ class Http3StreamTransport:
             self._quic.send(self._stream_id, b"", end=True)
             # Client.websocket opens a connection for the tunnel alone, so the connection ends with it
             await self._close_connection()
+
+    def getsockname(self) -> tuple[str | None, int]:
+        return self._quic.getsockname()
+
+    def getpeername(self) -> tuple[str | None, int]:
+        return self._quic.getpeername()

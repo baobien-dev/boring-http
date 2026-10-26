@@ -216,6 +216,12 @@ class QuicClient:
     def connection(self) -> QuicConnection:
         return self._connection
 
+    def getsockname(self) -> tuple[str | None, int]:
+        return self._socket.getsockname()
+
+    def getpeername(self) -> tuple[str | None, int]:
+        return self._socket.getpeername()
+
     @property
     def closed(self) -> bool:
         return self._terminated.done()

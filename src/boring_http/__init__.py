@@ -19,6 +19,7 @@ from boring_http.http3 import Http3Settings, Setting
 from boring_http.message import (
     URL,
     Body,
+    ConnectionInfo,
     Headers,
     HTTPStatusError,
     HTTPVersion,
@@ -35,6 +36,7 @@ __all__ = (
     "Body",
     "Client",
     "ConnectError",
+    "ConnectionInfo",
     "Cookie",
     "CookieJar",
     "HTTPError",

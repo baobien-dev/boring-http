@@ -10,6 +10,7 @@ from ssl2 import (
     Http2Priority,
     Http2SettingIdentifier,
     PseudoHeader,
+    TLSStream,
 )
 
 from boring_http.errors import (
@@ -19,7 +20,7 @@ from boring_http.errors import (
     StreamResetError,
 )
 from boring_http.hpack import Decoder, Encoder
-from boring_http.message import Headers, HTTPVersion, Request, Response
+from boring_http.message import ConnectionInfo, Headers, HTTPVersion, Request, Response
 from boring_http.timing import Deadline
 
 PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
@@ -180,6 +181,15 @@ class Http2Connection:
     @property
     def shared(self) -> bool:
         return True
+
+    @property
+    def info(self) -> ConnectionInfo:
+        transport = self._transport
+        return ConnectionInfo.of(
+            transport.getsockname(),
+            transport.getpeername(),
+            transport.buffer if isinstance(transport, TLSStream) else None,
+        )
 
     def take(self) -> None:
         pass
@@ -692,3 +702,9 @@ class Http2StreamTransport:
                 await self._connection.write_data(self._stream, b"", end=True)
             finally:
                 await self._connection.close()
+
+    def getsockname(self) -> tuple[str | None, int]:
+        return self._connection.info.local_address
+
+    def getpeername(self) -> tuple[str | None, int]:
+        return self._connection.info.remote_address

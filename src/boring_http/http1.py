@@ -1,9 +1,9 @@
 from collections.abc import AsyncGenerator, Callable
 
-from ssl2 import AsyncTransport
+from ssl2 import AsyncTransport, TLSStream
 
 from boring_http.errors import ProtocolError, RemoteDisconnected
-from boring_http.message import Headers, HTTPVersion, Request, Response
+from boring_http.message import ConnectionInfo, Headers, HTTPVersion, Request, Response
 from boring_http.timing import Deadline
 
 READ_SIZE = 65536
@@ -37,6 +37,15 @@ class Http1Connection:
     @property
     def shared(self) -> bool:
         return False
+
+    @property
+    def info(self) -> ConnectionInfo:
+        transport = self._transport
+        return ConnectionInfo.of(
+            transport.getsockname(),
+            transport.getpeername(),
+            transport.buffer if isinstance(transport, TLSStream) else None,
+        )
 
     def take(self) -> None:
         self.idle = False

@@ -5,7 +5,7 @@ from typing import Protocol
 
 from ssl2 import Proxy
 
-from boring_http.message import URL, Request, Response
+from boring_http.message import URL, ConnectionInfo, Request, Response
 from boring_http.timing import Deadline
 
 type Key = tuple[str, str, int, Proxy | None, bool]
@@ -21,6 +21,9 @@ class Connection(Protocol):
 
     @property
     def shared(self) -> bool: ...
+
+    @property
+    def info(self) -> ConnectionInfo: ...
 
     def take(self) -> None: ...
 

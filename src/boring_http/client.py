@@ -69,10 +69,6 @@ ALPN = {
     HTTPVersion.HTTP_2: NextProtocol.H2,
     HTTPVersion.HTTP_1: NextProtocol.HTTP1,
 }
-ALPS_EXTENSIONS = (
-    ExtensionType.application_settings,
-    ExtensionType.application_settings_old,
-)
 ACCEPTED_ENCODINGS = "gzip, deflate, br, zstd"
 USER_AGENT = "boring-http"
 DEFAULT_TIMEOUT = Timeout()
@@ -503,7 +499,11 @@ class Client:
             else tuple(
                 extension
                 for extension in self._tls.extensions
-                if extension not in ALPS_EXTENSIONS
+                if extension
+                not in (
+                    ExtensionType.application_settings,
+                    ExtensionType.application_settings_old,
+                )
             ),
         )
 
@@ -640,6 +640,7 @@ class Client:
                 raise
             response.started = started
             response.elapsed = monotonic() - started
+            response.connection = replace(connection.info, reused=connection.reused)
             return response
         raise HTTPError("unreachable")
 

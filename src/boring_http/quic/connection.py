@@ -10,7 +10,7 @@ from boring_ssl2 import (
     QuicHandshake,
     QuicVersion,
 )
-from ssl2 import NextProtocol, TLSError
+from ssl2 import NextProtocol, TLSBuffer, TLSError
 
 from boring_http.errors import ConnectError, ProtocolError
 from boring_http.quic.packet import (
@@ -437,6 +437,10 @@ class QuicConnection:
     @property
     def version(self) -> int:
         return self._version
+
+    @property
+    def buffer(self) -> TLSBuffer:
+        return self._handshake.buffer
 
     @property
     def peer_chain(self) -> tuple[bytes, ...]:
