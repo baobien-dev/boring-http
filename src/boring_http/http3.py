@@ -15,7 +15,7 @@ from boring_http.errors import (
 )
 from boring_http.message import Headers, HTTPVersion, Request, Response
 from boring_http.qpack import Qpack
-from boring_http.quic.connection import TransportParameters
+from boring_http.quic.connection import Parameter, TransportParameters
 from boring_http.quic.packet import Reader, Writer
 from boring_http.quic.protocol import OriginMemory, QuicClient
 from boring_http.timing import Deadline, Timeout
@@ -75,6 +75,16 @@ class Http3Settings:
     quic_version: QuicVersion = QuicVersion.V1
     tls: ClientHello | None = None
     grease: bool = False
+
+    def __post_init__(self) -> None:
+        # RFC 9368 section 2.1: the first packet is v1 and the other version is offered only in version_information
+        if (
+            self.quic_version is not QuicVersion.V1
+            and Parameter.VERSION_INFORMATION not in self.transport.order
+        ):
+            raise ValueError(
+                f"quic_version {self.quic_version.name} needs VERSION_INFORMATION in transport.order"
+            )
 
     def setting(self, identifier: Setting, default: int) -> int:
         return next(

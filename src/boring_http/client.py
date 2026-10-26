@@ -60,6 +60,10 @@ ALPN = {
     HTTPVersion.HTTP_2: NextProtocol.H2,
     HTTPVersion.HTTP_1: NextProtocol.HTTP1,
 }
+ALPS_EXTENSIONS = (
+    ExtensionType.application_settings,
+    ExtensionType.application_settings_old,
+)
 ACCEPTED_ENCODINGS = "gzip, deflate, br, zstd"
 USER_AGENT = "boring-http"
 DEFAULT_TIMEOUT = Timeout()
@@ -119,10 +123,15 @@ class Client:
         self._http3 = http3
         self._alt_svc: dict[tuple[str, int], float] = {}
         self._versions = tuple(HTTPVersion(version) for version in versions)
-        if http2 is None and (
-            HTTPVersion.HTTP_2 in self._versions
-            or (tls is not None and NextProtocol.H2.value in tls.application_protocols)
-        ):
+        # over TCP the ClientHello's own ALPN goes out when one is given, else the ALPN of versions
+        offered = (
+            tls.application_protocols
+            if tls is not None
+            else tuple(
+                ALPN[version].value for version in self._versions if version in ALPN
+            )
+        )
+        if http2 is None and NextProtocol.H2.value in offered:
             raise ValueError("h2 is offered, so http2= needs an Http2Settings")
         if http3 is None and HTTPVersion.HTTP_3 in self._versions:
             raise ValueError("h3 is in versions, so http3= needs an Http3Settings")
@@ -460,11 +469,19 @@ class Client:
             return self._tls
         # an HTTP/1.1-only connection keeps the ClientHello but can offer only its own protocol
         names = tuple(protocol.value for protocol in protocols)
+        settings = tuple(
+            name for name in self._tls.application_settings if name in names
+        )
         return replace(
             self._tls,
             application_protocols=names,
-            application_settings=tuple(
-                name for name in self._tls.application_settings if name in names
+            application_settings=settings,
+            extensions=self._tls.extensions
+            if settings
+            else tuple(
+                extension
+                for extension in self._tls.extensions
+                if extension not in ALPS_EXTENSIONS
             ),
         )
 
@@ -516,6 +533,9 @@ class Client:
                     self._context((NextProtocol.HTTP1,) if http1_only else None),
                     url.address,
                     proxy=proxy,
+                    proxy_context=self._context((NextProtocol.HTTP1,))
+                    if proxy is not None and proxy.scheme is ProxyScheme.HTTPS
+                    else None,
                 )
                 await self._checked(stream, url.authority)
                 if (
@@ -533,7 +553,7 @@ class Client:
                 transport: AsyncTransport
                 if proxy.scheme is ProxyScheme.HTTPS:
                     secured = await TLSStream.connect(
-                        self._context(), (proxy.host, proxy.port)
+                        self._context((NextProtocol.HTTP1,)), (proxy.host, proxy.port)
                     )
                     await self._checked(secured, f"{proxy.host}:{proxy.port}")
                     transport = secured

@@ -113,6 +113,21 @@ NEVER_REMEMBERED = (
     Parameter.ORIGINAL_DESTINATION_CONNECTION_ID,
     Parameter.RETRY_SOURCE_CONNECTION_ID,
 )
+# RFC 9000 section 18.2 and RFC 9221 section 3: the values a peer assumes when a parameter is absent
+ABSENT = {
+    Parameter.MAX_IDLE_TIMEOUT: 0,
+    Parameter.MAX_UDP_PAYLOAD_SIZE: 65527,
+    Parameter.INITIAL_MAX_DATA: 0,
+    Parameter.INITIAL_MAX_STREAM_DATA_BIDI_LOCAL: 0,
+    Parameter.INITIAL_MAX_STREAM_DATA_BIDI_REMOTE: 0,
+    Parameter.INITIAL_MAX_STREAM_DATA_UNI: 0,
+    Parameter.INITIAL_MAX_STREAMS_BIDI: 0,
+    Parameter.INITIAL_MAX_STREAMS_UNI: 0,
+    Parameter.ACK_DELAY_EXPONENT: 3,
+    Parameter.MAX_ACK_DELAY: 25,
+    Parameter.ACTIVE_CONNECTION_ID_LIMIT: 2,
+    Parameter.MAX_DATAGRAM_FRAME_SIZE: 0,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,26 +141,37 @@ class TransportParameters:
     initial_max_streams_bidi: int
     initial_max_streams_uni: int
     order: tuple[Parameter, ...]
-    # RFC 9000 section 18.2 and RFC 9221 section 3: the values a peer assumes when a parameter is absent
-    ack_delay_exponent: int = 3
-    max_ack_delay: int = 25
-    active_connection_id_limit: int = 2
-    max_datagram_frame_size: int = 0
+    ack_delay_exponent: int = ABSENT[Parameter.ACK_DELAY_EXPONENT]
+    max_ack_delay: int = ABSENT[Parameter.MAX_ACK_DELAY]
+    active_connection_id_limit: int = ABSENT[Parameter.ACTIVE_CONNECTION_ID_LIMIT]
+    max_datagram_frame_size: int = ABSENT[Parameter.MAX_DATAGRAM_FRAME_SIZE]
     google_connection_options: tuple[bytes, ...] = ()
     initial_round_trip_time: int | None = None
     grease: bool = False
     grease_version: bool = False
     shuffle: bool = False
 
-    def encode(
-        self,
-        source_connection_id: bytes,
-        version: QuicVersion,
-        versions: tuple[QuicVersion, ...],
-        round_trip_time: int | None = None,
-    ) -> bytes:
-        writer = Writer()
-        integers = {
+    def __post_init__(self) -> None:
+        # a value left out of order never reaches the peer, which then works from the absent value instead
+        applied = {
+            parameter: value != ABSENT[parameter]
+            for parameter, value in self._integers.items()
+        } | {
+            Parameter.VERSION_INFORMATION: self.grease_version,
+            Parameter.GOOGLE_CONNECTION_OPTIONS: bool(self.google_connection_options),
+            Parameter.INITIAL_ROUND_TRIP_TIME: self.initial_round_trip_time is not None,
+        }
+        unsent = [
+            parameter.name
+            for parameter, changed in applied.items()
+            if changed and parameter not in self.order
+        ]
+        if unsent:
+            raise ValueError(f"{', '.join(unsent)} must be in order to take effect")
+
+    @property
+    def _integers(self) -> dict[Parameter, int]:
+        return {
             Parameter.MAX_IDLE_TIMEOUT: self.max_idle_timeout,
             Parameter.MAX_UDP_PAYLOAD_SIZE: self.max_udp_payload_size,
             Parameter.INITIAL_MAX_DATA: self.initial_max_data,
@@ -159,6 +185,16 @@ class TransportParameters:
             Parameter.ACTIVE_CONNECTION_ID_LIMIT: self.active_connection_id_limit,
             Parameter.MAX_DATAGRAM_FRAME_SIZE: self.max_datagram_frame_size,
         }
+
+    def encode(
+        self,
+        source_connection_id: bytes,
+        version: QuicVersion,
+        versions: tuple[QuicVersion, ...],
+        round_trip_time: int | None = None,
+    ) -> bytes:
+        writer = Writer()
+        integers = self._integers
         pairs: list[tuple[int, bytes]] = []
         for parameter in self.order:
             if parameter in integers:
@@ -361,7 +397,7 @@ class QuicConnection:
         self._closing: ConnectionClose | None = None
         self._close_sent = False
         self._terminated = False
-        self._idle_timeout = parameters.max_idle_timeout / 1000
+        self._idle_timeout: float | None = parameters.max_idle_timeout / 1000 or None
         self._last_activity = now
         self._ack_timer: float | None = None
         self._peer_connection_ids: dict[int, tuple[bytes, bytes]] = {}
@@ -586,18 +622,23 @@ class QuicConnection:
         self._mtu_probe = None
 
     def next_timer(self) -> float | None:
-        candidates = [self._last_activity + self._idle_timeout]
+        candidates: list[float] = []
+        if self._idle_timeout is not None:
+            candidates.append(self._last_activity + self._idle_timeout)
         if self._ack_timer is not None:
             candidates.append(self._ack_timer)
         timer = self._recovery.loss_timer(EncryptionLevel.HANDSHAKE in self._keys)
         if timer is not None:
             candidates.append(timer[0])
-        return min(candidates)
+        return min(candidates, default=None)
 
     def handle_timer(self, now: float) -> None:
         if self._terminated:
             return
-        if now >= self._last_activity + self._idle_timeout:
+        if (
+            self._idle_timeout is not None
+            and now >= self._last_activity + self._idle_timeout
+        ):
             self._terminated = True
             self._events.append(
                 ConnectionTerminated(TransportError.NO_ERROR, "idle timeout", False)
@@ -1010,9 +1051,16 @@ class QuicConnection:
         self._peer_max_streams[False] = peer.integer(
             Parameter.INITIAL_MAX_STREAMS_UNI, 0
         )
-        peer_idle = peer.integer(Parameter.MAX_IDLE_TIMEOUT, 0) / 1000
-        own_idle = self._parameters.max_idle_timeout / 1000
-        self._idle_timeout = min(own_idle, peer_idle) if peer_idle else own_idle
+        # RFC 9000 section 10.1: the smaller advertised timeout, where 0 means that side sets none
+        timeouts = [
+            value / 1000
+            for value in (
+                peer.integer(Parameter.MAX_IDLE_TIMEOUT, 0),
+                self._parameters.max_idle_timeout,
+            )
+            if value
+        ]
+        self._idle_timeout = min(timeouts) if timeouts else None
         self._recovery.max_ack_delay = peer.integer(Parameter.MAX_ACK_DELAY, 25) / 1000
 
     def _reject_early_data(self) -> None:
