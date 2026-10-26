@@ -11,11 +11,14 @@ uv add boring-http
 ```python
 import asyncio
 
-from boring_http import Client
+from boring_http import Client, Http2Settings
+from ssl2 import AkamaiFingerprint
+
+http2 = Http2Settings(AkamaiFingerprint.parse("1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"))
 
 
 async def main() -> None:
-    async with Client(headers=[("User-Agent", "boring-http/0.1"), ("Accept", "application/json")]) as client:
+    async with Client(http2=http2, headers=[("User-Agent", "boring-http/0.1"), ("Accept", "application/json")]) as client:
         response = await client.get("https://pingly.us.kg/api/all", params={"page": 2})
         print(response.status, response.version, response.content_type)  # 200 h2 application/json
         report = response.json()
@@ -36,11 +39,14 @@ Certificates are checked against the system trust store, or against `trust_store
 ```python
 import asyncio
 
-from boring_http import Client
+from boring_http import Client, Http2Settings
+from ssl2 import AkamaiFingerprint
+
+http2 = Http2Settings(AkamaiFingerprint.parse("1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"))
 
 
 async def main() -> None:
-    async with Client() as client:
+    async with Client(http2=http2) as client:
         response = await client.get("https://httpbingo.org/redirect/2")
         print(response.status, response.url.path, [step.status for step in response.history])  # 200 /get [302, 302]
 
@@ -61,11 +67,14 @@ asyncio.run(main())
 ```python
 import asyncio
 
-from boring_http import Client, Timeout, TimeoutError
+from boring_http import Client, Http2Settings, Timeout, TimeoutError
+from ssl2 import AkamaiFingerprint
+
+http2 = Http2Settings(AkamaiFingerprint.parse("1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"))
 
 
 async def main() -> None:
-    async with Client(timeout=Timeout(connect=5, read=10, write=10, total=30)) as client:
+    async with Client(http2=http2, timeout=Timeout(connect=5, read=10, write=10, total=30)) as client:
         async with client.stream("GET", "https://httpbingo.org/stream-bytes/100000") as response:
             size = sum([len(chunk) async for chunk in response.aiter_bytes()])
         print(response.status, size)  # 200 100000
@@ -85,17 +94,47 @@ A single number sets every phase and the total, so the request gives up after th
 
 ```python
 import asyncio
+from dataclasses import replace
 
-from boring_http import Client, Http3Profile, QuicVersion
+from boring_http import Client, Http2Settings, Http3Settings, Parameter, QuicVersion, Setting, TransportParameters
+from ssl2 import AkamaiFingerprint, PseudoHeader
+
+http2 = Http2Settings(AkamaiFingerprint.parse("1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"))
+http3 = Http3Settings(
+    settings=((Setting.QPACK_MAX_TABLE_CAPACITY, 65536), (Setting.MAX_FIELD_SECTION_SIZE, 262144), (Setting.QPACK_BLOCKED_STREAMS, 100)),
+    pseudo_header_order=(PseudoHeader.METHOD, PseudoHeader.AUTHORITY, PseudoHeader.SCHEME, PseudoHeader.PATH),
+    transport=TransportParameters(
+        max_idle_timeout=30000,
+        max_udp_payload_size=1472,
+        initial_max_data=15728640,
+        initial_max_stream_data_bidi_local=6291456,
+        initial_max_stream_data_bidi_remote=6291456,
+        initial_max_stream_data_uni=6291456,
+        initial_max_streams_bidi=100,
+        initial_max_streams_uni=100,
+        order=(
+            Parameter.MAX_IDLE_TIMEOUT,
+            Parameter.MAX_UDP_PAYLOAD_SIZE,
+            Parameter.INITIAL_MAX_DATA,
+            Parameter.INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
+            Parameter.INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
+            Parameter.INITIAL_MAX_STREAM_DATA_UNI,
+            Parameter.INITIAL_MAX_STREAMS_BIDI,
+            Parameter.INITIAL_MAX_STREAMS_UNI,
+            Parameter.INITIAL_SOURCE_CONNECTION_ID,
+            Parameter.VERSION_INFORMATION,
+        ),
+    ),
+)
 
 
 async def main() -> None:
-    async with Client(versions=("h3", "h2", "h1")) as client:
+    async with Client(versions=("h3", "h2", "h1"), http2=http2, http3=http3) as client:
         first = await client.get("https://pingly.us.kg/api/all")
         second = await client.get("https://pingly.us.kg/api/all")
         print(first.version, second.version)  # h2 h3, the Alt-Svc header taught the client that this origin speaks HTTP/3
 
-    async with Client(versions=("h3",), http3=Http3Profile(quic_version=QuicVersion.V2)) as client:
+    async with Client(versions=("h3",), http3=replace(http3, quic_version=QuicVersion.V2)) as client:
         response = await client.get("https://pingly.us.kg/api/all")
         print(response.version, response.json()["http_version"])  # h3 HTTP/3.0
 
@@ -103,30 +142,58 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-The default is `versions=("h2", "h1")`. With `"h3"` in the list the client switches an origin to QUIC after an `Alt-Svc: h3` header and falls back to TCP when the QUIC route stops answering; `versions=("h3",)` goes straight to QUIC. QUIC v1 is the default; `quic_version=QuicVersion.V2` offers v2 through compatible version negotiation (RFC 9368), so the first packet is still v1 and a server that speaks v2, such as aioquic, ngtcp2, haproxy or haskell quic, switches to it, while every other server simply stays on v1. Retry packets, version negotiation, loss recovery, pacing, flow control, key updates, path MTU probing from 1200 up to 1452 bytes with the don't-fragment flag set, QPACK with a 64 KiB dynamic table on the decoding side and 0-RTT are handled; connection migration is not. A second connection to an origin resumes the TLS session and sends GET, HEAD and OPTIONS requests before the handshake has finished, under the limits and SETTINGS the server gave last time; other methods wait for the handshake, a 425 answer is retried after it, and a server that declines the early data gets it again under the 1-RTT keys. The transport parameters are Chrome 155's set, in a fresh random order with a GREASE entry, a GREASE version, Chrome's connection options and, on a resumed connection, the round trip time measured last time; `TransportParameters` on the `Http3Profile` changes any of it. The control stream carries SETTINGS with a GREASE entry, a GREASE frame, and a PRIORITY_UPDATE for every request that has a `priority` header, as Chrome sends them.
+The default is `versions=("h2", "h1")`. With `"h3"` in the list the client switches an origin to QUIC after an `Alt-Svc: h3` header and falls back to TCP when the QUIC route stops answering; `versions=("h3",)` goes straight to QUIC. QUIC v1 is the default; `quic_version=QuicVersion.V2` offers v2 through compatible version negotiation (RFC 9368), so the first packet is still v1 and a server that speaks v2, such as aioquic, ngtcp2, haproxy or haskell quic, switches to it, while every other server simply stays on v1. Retry packets, version negotiation, loss recovery, pacing, flow control, key updates, path MTU probing from 1200 up to 1452 bytes with the don't-fragment flag set, QPACK with the dynamic table the SETTINGS allow on the decoding side and 0-RTT are handled; connection migration is not. A second connection to an origin resumes the TLS session and sends GET, HEAD and OPTIONS requests before the handshake has finished, under the limits and SETTINGS the server gave last time; other methods wait for the handshake, a 425 answer is retried after it, and a server that declines the early data gets it again under the 1-RTT keys. `TransportParameters` sends the parameters in `order`, in that order; `grease=True` adds a GREASE entry, `grease_version=True` a GREASE version, `shuffle=True` a fresh random order on every connection, and `INITIAL_ROUND_TRIP_TIME` in `order` sends the round trip time measured last time on a resumed connection. The control stream carries the SETTINGS of the `Http3Settings`, a GREASE entry and a GREASE frame with `grease=True`, and a PRIORITY_UPDATE for every request that has a `priority` header.
 
 ## Proxies
 
 ```python
 import asyncio
 
-from boring_http import Client
-from ssl2 import ProxyError
+from boring_http import Client, Http2Settings, Http3Settings, Parameter, Setting, TransportParameters
+from ssl2 import AkamaiFingerprint, ProxyError, PseudoHeader
+
+http2 = Http2Settings(AkamaiFingerprint.parse("1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"))
+http3 = Http3Settings(
+    settings=((Setting.QPACK_MAX_TABLE_CAPACITY, 65536), (Setting.MAX_FIELD_SECTION_SIZE, 262144), (Setting.QPACK_BLOCKED_STREAMS, 100)),
+    pseudo_header_order=(PseudoHeader.METHOD, PseudoHeader.AUTHORITY, PseudoHeader.SCHEME, PseudoHeader.PATH),
+    transport=TransportParameters(
+        max_idle_timeout=30000,
+        max_udp_payload_size=1472,
+        initial_max_data=15728640,
+        initial_max_stream_data_bidi_local=6291456,
+        initial_max_stream_data_bidi_remote=6291456,
+        initial_max_stream_data_uni=6291456,
+        initial_max_streams_bidi=100,
+        initial_max_streams_uni=100,
+        order=(
+            Parameter.MAX_IDLE_TIMEOUT,
+            Parameter.MAX_UDP_PAYLOAD_SIZE,
+            Parameter.INITIAL_MAX_DATA,
+            Parameter.INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
+            Parameter.INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
+            Parameter.INITIAL_MAX_STREAM_DATA_UNI,
+            Parameter.INITIAL_MAX_STREAMS_BIDI,
+            Parameter.INITIAL_MAX_STREAMS_UNI,
+            Parameter.INITIAL_SOURCE_CONNECTION_ID,
+            Parameter.VERSION_INFORMATION,
+        ),
+    ),
+)
 
 
 async def main() -> None:
-    async with Client(proxy="socks5h://alice:secret@127.0.0.1:1080") as client:
+    async with Client(http2=http2, proxy="socks5h://alice:secret@127.0.0.1:1080") as client:
         response = await client.get("https://pingly.us.kg/api/all")  # SOCKS5 CONNECT, HTTP/2 inside
         print(response.version, response.json()["http_version"])  # h2 HTTP/2.0
         response = await client.get("https://pingly.us.kg/api/all", proxy="http://alice:secret@127.0.0.1:3128")  # per request
         print(response.version)  # h2
 
-    async with Client(versions=("h3",), proxy="socks5h://alice:secret@127.0.0.1:1080") as client:
+    async with Client(versions=("h3",), http3=http3, proxy="socks5h://alice:secret@127.0.0.1:1080") as client:
         response = await client.get("https://pingly.us.kg/api/all")  # SOCKS5 UDP ASSOCIATE, QUIC datagrams through the relay
         print(response.version, response.json()["http_version"])  # h3 HTTP/3.0
 
     try:
-        async with Client(proxy="socks5h://alice:wrong@127.0.0.1:1080") as client:
+        async with Client(http2=http2, proxy="socks5h://alice:wrong@127.0.0.1:1080") as client:
             await client.get("https://pingly.us.kg/api/all")
     except ProxyError as refusal:
         print(refusal)  # the SOCKS5 proxy rejected the username and password
@@ -142,14 +209,16 @@ asyncio.run(main())
 ```python
 import asyncio
 
-from boring_http import CHROME_HTTP2, Client
+from boring_http import Client, Http2Settings
 from ssl2 import (
     JA4,
+    AkamaiFingerprint,
     CertificateCompressionAlgorithm,
     CipherSuite,
     ClientHelloBuilder,
     ECPointFormat,
     ExtensionType,
+    Http2Priority,
     NamedGroup,
     NextProtocol,
     ProtocolVersion,
@@ -157,7 +226,7 @@ from ssl2 import (
     SignatureScheme,
 )
 
-profile = (
+hello = (
     ClientHelloBuilder()
     .supported_versions(ProtocolVersion.TLS_1_3, ProtocolVersion.TLS_1_2)
     .cipher_suites(
@@ -214,13 +283,17 @@ profile = (
     .psk_key_exchange_modes(PskKeyExchangeMode.psk_dhe_ke)
     .build()
 )
+http2 = Http2Settings(
+    AkamaiFingerprint.parse("1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"),
+    headers_priority=Http2Priority(stream_id=0, exclusive=True, dependency=0, weight=256),
+)
 
 
 async def main() -> None:
-    async with Client(tls=profile, http2=CHROME_HTTP2) as client:
+    async with Client(tls=hello, http2=http2) as client:
         report = (await client.get("https://pingly.us.kg/api/all")).json()
-        print(report["tls"]["ja4"] == JA4.of(profile).text, report["tls"]["ja4"])  # True t13d1516h2_8daaf6152771_d8a2da3f94cd
-        print(report["http2"]["akamai_fingerprint"] == CHROME_HTTP2.fingerprint.text, report["http2"]["akamai_fingerprint"])  # True 1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p
+        print(report["tls"]["ja4"] == JA4.of(hello).text, report["tls"]["ja4"])  # True t13d1516h2_8daaf6152771_d8a2da3f94cd
+        print(report["http2"]["akamai_fingerprint"] == http2.fingerprint.text, report["http2"]["akamai_fingerprint"])  # True 1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p
 
 
 asyncio.run(main())
@@ -231,9 +304,8 @@ Over HTTP/3 the same holds, with the ClientHello Chrome 155 sends on QUIC: TLS 1
 ```python
 import asyncio
 
-from boring_http import Client, Http3Profile
+from boring_http import Client, Http3Settings, Parameter, Setting, TransportParameters
 from ssl2 import (
-    CHROME_TRUST_ANCHOR_IDS,
     JA4,
     CertificateCompressionAlgorithm,
     CipherSuite,
@@ -243,11 +315,12 @@ from ssl2 import (
     NamedGroup,
     NextProtocol,
     ProtocolVersion,
+    PseudoHeader,
     PskKeyExchangeMode,
     SignatureScheme,
 )
 
-quic_profile = (
+quic_hello = (
     ClientHelloBuilder()
     .supported_versions(ProtocolVersion.TLS_1_3)
     .cipher_suites(CipherSuite.TLS_AES_128_GCM_SHA256, CipherSuite.TLS_AES_256_GCM_SHA384, CipherSuite.TLS_CHACHA20_POLY1305_SHA256)
@@ -283,37 +356,80 @@ quic_profile = (
     .application_settings(NextProtocol.H3)
     .certificate_compression(CertificateCompressionAlgorithm.brotli)
     .psk_key_exchange_modes(PskKeyExchangeMode.psk_dhe_ke)
-    .trust_anchor_ids(*CHROME_TRUST_ANCHOR_IDS)
+    .trust_anchor_ids(
+        "44947.2.1", "44947.2.6", "44947.2.13", "44947.2.14", "44947.2.15", "44947.2.18", "44947.2.19", "44947.2.20",
+        "52580.200109.1.7", "52580.200109.1.8", "52580.200109.1.9", "52580.200109.1.10", "52580.200109.1.11", "52580.200109.1.12", "52580.200109.1.13", "52580.200109.1.18", "52580.200109.1.19",
+        "11129.9.1", "11129.9.4", "11129.9.5", "11129.9.6", "11129.9.7", "11129.9.8", "11129.9.10", "11129.9.11", "11129.9.12", "11129.9.13", "11129.9.15",
+    )
     .grease()
     .permute_extensions()
     .build()
 )
+http3 = Http3Settings(
+    settings=((Setting.QPACK_MAX_TABLE_CAPACITY, 65536), (Setting.MAX_FIELD_SECTION_SIZE, 262144), (Setting.QPACK_BLOCKED_STREAMS, 100), (Setting.H3_DATAGRAM, 1)),
+    pseudo_header_order=(PseudoHeader.METHOD, PseudoHeader.AUTHORITY, PseudoHeader.SCHEME, PseudoHeader.PATH),
+    transport=TransportParameters(
+        max_idle_timeout=30000,
+        max_udp_payload_size=1472,
+        initial_max_data=15728640,
+        initial_max_stream_data_bidi_local=6291456,
+        initial_max_stream_data_bidi_remote=6291456,
+        initial_max_stream_data_uni=6291456,
+        initial_max_streams_bidi=100,
+        initial_max_streams_uni=103,
+        order=(
+            Parameter.MAX_IDLE_TIMEOUT,
+            Parameter.MAX_UDP_PAYLOAD_SIZE,
+            Parameter.INITIAL_MAX_DATA,
+            Parameter.INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
+            Parameter.INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
+            Parameter.INITIAL_MAX_STREAM_DATA_UNI,
+            Parameter.INITIAL_MAX_STREAMS_BIDI,
+            Parameter.INITIAL_MAX_STREAMS_UNI,
+            Parameter.INITIAL_SOURCE_CONNECTION_ID,
+            Parameter.VERSION_INFORMATION,
+            Parameter.MAX_DATAGRAM_FRAME_SIZE,
+            Parameter.GOOGLE_CONNECTION_OPTIONS,
+            Parameter.INITIAL_ROUND_TRIP_TIME,
+        ),
+        max_datagram_frame_size=65536,
+        google_connection_options=(b"ORIG",),
+        grease=True,
+        grease_version=True,
+        shuffle=True,
+    ),
+    tls=quic_hello,
+    grease=True,
+)
 
 
 async def main() -> None:
-    async with Client(versions=("h3",), http3=Http3Profile(tls=quic_profile), headers=[("priority", "u=0, i")]) as client:
+    async with Client(versions=("h3",), http3=http3, headers=[("priority", "u=0, i")]) as client:
         _ = await client.get("https://pingly.us.kg/api/all")
         await client.close()  # the next request opens a new connection, which resumes the session
         report = (await client.get("https://pingly.us.kg/api/all")).json()
-        print(report["tls"]["ja4"] == JA4.of(quic_profile, JA4Transport.QUIC).text, report["tls"]["ja4"])  # True q13d0313h3_55b375c5d22e_b0954bf1abdf
+        print(report["tls"]["ja4"] == JA4.of(quic_hello, JA4Transport.QUIC).text, report["tls"]["ja4"])  # True q13d0313h3_55b375c5d22e_b0954bf1abdf
         print(report["http3"]["h3_text"])  # 1:65536;6:262144;7:100;51:1;GREASE|m,a,s,p
 
 
 asyncio.run(main())
 ```
 
-`tls` is a `ssl2.ClientHello`; BoringSSL sends it byte for byte or the client refuses it with the reason. `http2` is an `Http2Profile` with the SETTINGS, WINDOW_UPDATE, priorities and pseudo-header order; `CHROME_HTTP2` is the default. `http3` is an `Http3Profile` with the HTTP/3 SETTINGS, QUIC transport parameters and QUIC version; `CHROME_HTTP3` is the default.
+`tls` is a `ssl2.ClientHello`; BoringSSL sends it byte for byte or the client refuses it with the reason. `http2` is an `Http2Settings` with the SETTINGS, WINDOW_UPDATE, priorities and pseudo-header order. `http3` is an `Http3Settings` with the HTTP/3 SETTINGS, pseudo-header order, QUIC transport parameters and QUIC version. Neither has a default: `h2` in `versions` or in the ClientHello needs `http2`, and `h3` in `versions` needs `http3`.
 
 ## WebSocket
 
 ```python
 import asyncio
 
-from boring_http import Client
+from boring_http import Client, Http2Settings
+from ssl2 import AkamaiFingerprint
+
+http2 = Http2Settings(AkamaiFingerprint.parse("1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"))
 
 
 async def main() -> None:
-    async with Client() as client:
+    async with Client(http2=http2) as client:
         websocket = await client.websocket("wss://echo.websocket.org/")
         print((await websocket.receive())[:17])  # Request served by
         await websocket.send("hello")
@@ -334,11 +450,39 @@ Over HTTP/1.1 this is the Upgrade handshake. Over HTTP/2 and HTTP/3 it is Extend
 ```python
 import uvloop
 
-from boring_http import Client
+from boring_http import Client, Http3Settings, Parameter, Setting, TransportParameters
+from ssl2 import PseudoHeader
+
+http3 = Http3Settings(
+    settings=((Setting.QPACK_MAX_TABLE_CAPACITY, 65536), (Setting.MAX_FIELD_SECTION_SIZE, 262144), (Setting.QPACK_BLOCKED_STREAMS, 100)),
+    pseudo_header_order=(PseudoHeader.METHOD, PseudoHeader.AUTHORITY, PseudoHeader.SCHEME, PseudoHeader.PATH),
+    transport=TransportParameters(
+        max_idle_timeout=30000,
+        max_udp_payload_size=1472,
+        initial_max_data=15728640,
+        initial_max_stream_data_bidi_local=6291456,
+        initial_max_stream_data_bidi_remote=6291456,
+        initial_max_stream_data_uni=6291456,
+        initial_max_streams_bidi=100,
+        initial_max_streams_uni=100,
+        order=(
+            Parameter.MAX_IDLE_TIMEOUT,
+            Parameter.MAX_UDP_PAYLOAD_SIZE,
+            Parameter.INITIAL_MAX_DATA,
+            Parameter.INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
+            Parameter.INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
+            Parameter.INITIAL_MAX_STREAM_DATA_UNI,
+            Parameter.INITIAL_MAX_STREAMS_BIDI,
+            Parameter.INITIAL_MAX_STREAMS_UNI,
+            Parameter.INITIAL_SOURCE_CONNECTION_ID,
+            Parameter.VERSION_INFORMATION,
+        ),
+    ),
+)
 
 
 async def main() -> None:
-    async with Client(versions=("h3",)) as client:
+    async with Client(versions=("h3",), http3=http3) as client:
         print((await client.get("https://pingly.us.kg/api/all")).version)  # h3
 
 

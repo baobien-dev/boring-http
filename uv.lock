@@ -4,7 +4,7 @@ requires-python = ">=3.14"
 
 [[package]]
 name = "boring-http"
-version = "1.2.0"
+version = "2.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "boring-ssl2" },
@@ -30,5 +30,5 @@ requires-dist = [{ name = "ssl2", editable = "../ssl2" }]
 
 [[package]]
 name = "ssl2"
-version = "1.2.0"
+version = "2.0.0"
 source = { editable = "../ssl2" }

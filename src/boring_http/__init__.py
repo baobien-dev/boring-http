@@ -14,8 +14,8 @@ from boring_http.errors import (
     TooManyRedirects,
     WebSocketClosed,
 )
-from boring_http.http2 import CHROME_HTTP2, Http2Profile
-from boring_http.http3 import CHROME_HTTP3, Http3Profile
+from boring_http.http2 import Http2Settings
+from boring_http.http3 import Http3Settings, Setting
 from boring_http.message import (
     URL,
     Body,
@@ -25,14 +25,12 @@ from boring_http.message import (
     Request,
     Response,
 )
-from boring_http.quic.connection import TransportParameters
+from boring_http.quic.connection import Parameter, TransportParameters
 from boring_http.revocation import Revocation
 from boring_http.timing import Timeout
 from boring_http.websocket import WebSocket
 
 __all__ = (
-    "CHROME_HTTP2",
-    "CHROME_HTTP3",
     "URL",
     "Body",
     "Client",
@@ -43,8 +41,9 @@ __all__ = (
     "HTTPStatusError",
     "HTTPVersion",
     "Headers",
-    "Http2Profile",
-    "Http3Profile",
+    "Http2Settings",
+    "Http3Settings",
+    "Parameter",
     "ProtocolError",
     "QuicVersion",
     "RemoteDisconnected",
@@ -52,6 +51,7 @@ __all__ = (
     "Response",
     "Revocation",
     "RevocationError",
+    "Setting",
     "StreamRefused",
     "StreamResetError",
     "Timeout",

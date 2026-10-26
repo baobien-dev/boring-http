@@ -1,7 +1,7 @@
 import asyncio
 import secrets
 from collections.abc import AsyncGenerator, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
 
 from boring_ssl2 import QuicVersion
@@ -68,32 +68,20 @@ class ErrorCode(IntEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class Http3Profile:
-    settings: tuple[tuple[int, int], ...] = (
-        (Setting.QPACK_MAX_TABLE_CAPACITY, 65536),
-        (Setting.MAX_FIELD_SECTION_SIZE, 262144),
-        (Setting.QPACK_BLOCKED_STREAMS, 100),
-        (Setting.H3_DATAGRAM, 1),
-    )
+class Http3Settings:
+    settings: tuple[tuple[int, int], ...]
+    pseudo_header_order: tuple[PseudoHeader, ...]
+    transport: TransportParameters
+    quic_version: QuicVersion = QuicVersion.V1
+    tls: ClientHello | None = None
+    grease: bool = False
 
     def setting(self, identifier: Setting, default: int) -> int:
         return next(
             (value for key, value in self.settings if key == identifier), default
         )
 
-    pseudo_header_order: tuple[PseudoHeader, ...] = (
-        PseudoHeader.METHOD,
-        PseudoHeader.AUTHORITY,
-        PseudoHeader.SCHEME,
-        PseudoHeader.PATH,
-    )
-    transport: TransportParameters = field(default_factory=TransportParameters)
-    quic_version: QuicVersion = QuicVersion.V1
-    tls: ClientHello | None = None
-    grease: bool = True
 
-
-CHROME_HTTP3 = Http3Profile()
 # RFC 8470 section 5.2: the requests a client may send before the handshake, since a server may see them twice
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
@@ -152,12 +140,12 @@ class Http3Connection:
     def __init__(
         self,
         quic: QuicClient,
-        profile: Http3Profile,
+        settings: Http3Settings,
         memory: OriginMemory | None = None,
     ) -> None:
         self._quic = quic
-        self._profile = profile
-        self._qpack = Qpack(profile.setting(Setting.QPACK_MAX_TABLE_CAPACITY, 0))
+        self._local_settings = settings
+        self._qpack = Qpack(settings.setting(Setting.QPACK_MAX_TABLE_CAPACITY, 0))
         self._control_stream = -1
         self._decoder_stream = -1
         self._peer_settings: dict[int, int] = {}
@@ -197,9 +185,9 @@ class Http3Connection:
         writer = Writer()
         writer.varint(StreamType.CONTROL)
         settings = Writer()
-        entries = list(self._profile.settings)
-        if self._profile.grease:
-            # RFC 9114 section 7.2.4.1: a reserved identifier the peer must ignore, placed at random like Chrome does
+        entries = list(self._local_settings.settings)
+        if self._local_settings.grease:
+            # RFC 9114 section 7.2.4.1: a reserved identifier the peer must ignore, placed at random
             entries.insert(
                 secrets.randbelow(len(entries) + 1),
                 (0x1F * secrets.randbelow(1 << 16) + 0x21, secrets.randbelow(1 << 20)),
@@ -210,8 +198,8 @@ class Http3Connection:
         writer.varint(FrameType.SETTINGS)
         writer.varint(len(settings))
         writer.put(settings.finish())
-        if self._profile.grease:
-            # RFC 9114 section 7.2.8: an empty frame of a reserved type right after SETTINGS, as Chrome sends it
+        if self._local_settings.grease:
+            # RFC 9114 section 7.2.8: an empty frame of a reserved type right after SETTINGS
             writer.varint(0x1F * secrets.randbelow(1 << 32) + 0x21)
             writer.varint(0)
         self._quic.send(self._control_stream, writer.finish())
@@ -252,7 +240,7 @@ class Http3Connection:
         stream_id = self._quic.open_stream()
         priority = request.headers.get("priority")
         if priority is not None:
-            # RFC 9218 section 7.2: Chrome announces a request's priority on the control stream before its HEADERS
+            # RFC 9218 section 7.2: a request's priority goes on the control stream before its HEADERS
             self._quic.send(
                 self._control_stream,
                 self._frame(
@@ -341,7 +329,7 @@ class Http3Connection:
             PseudoHeader.SCHEME: (b":scheme", scheme.encode()),
             PseudoHeader.PATH: (b":path", request.url.target.encode()),
         }
-        fields = [pseudo[header] for header in self._profile.pseudo_header_order]
+        fields = [pseudo[header] for header in self._local_settings.pseudo_header_order]
         if protocol is not None:
             fields.insert(1, (b":protocol", protocol))
         return fields + [(name.encode(), value.encode()) for name, value in wire]

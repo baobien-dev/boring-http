@@ -35,8 +35,8 @@ from boring_http.errors import (
     TooManyRedirects,
 )
 from boring_http.http1 import Http1Connection
-from boring_http.http2 import CHROME_HTTP2, Http2Connection, Http2Profile
-from boring_http.http3 import CHROME_HTTP3, Http3Connection, Http3Profile
+from boring_http.http2 import Http2Connection, Http2Settings
+from boring_http.http3 import Http3Connection, Http3Settings
 from boring_http.message import (
     URL,
     Body,
@@ -94,8 +94,8 @@ class Client:
         timeout: float | Timeout | None = DEFAULT_TIMEOUT,
         proxy: Proxy | str | None = None,
         tls: ClientHello | None = None,
-        http2: Http2Profile = CHROME_HTTP2,
-        http3: Http3Profile = CHROME_HTTP3,
+        http2: Http2Settings | None = None,
+        http3: Http3Settings | None = None,
         versions: Sequence[HTTPVersion | str] = (
             HTTPVersion.HTTP_2,
             HTTPVersion.HTTP_1,
@@ -119,6 +119,13 @@ class Client:
         self._http3 = http3
         self._alt_svc: dict[tuple[str, int], float] = {}
         self._versions = tuple(HTTPVersion(version) for version in versions)
+        if http2 is None and (
+            HTTPVersion.HTTP_2 in self._versions
+            or (tls is not None and NextProtocol.H2.value in tls.application_protocols)
+        ):
+            raise ValueError("h2 is offered, so http2= needs an Http2Settings")
+        if http3 is None and HTTPVersion.HTTP_3 in self._versions:
+            raise ValueError("h3 is in versions, so http3= needs an Http3Settings")
         self._trust_store = trust_store
         self._verify = verify
         self._revocations = Revocations(revocation, self._fetch_crl)
@@ -418,7 +425,7 @@ class Client:
         if protocols not in self._contexts:
             hello = (
                 self._http3.tls
-                if protocols == (NextProtocol.H3,)
+                if protocols == (NextProtocol.H3,) and self._http3 is not None
                 else self._adapted(protocols)
             )
             if hello is None:
@@ -451,7 +458,7 @@ class Client:
     ) -> ClientHello | None:
         if self._tls is None or protocols is None:
             return self._tls
-        # an HTTP/1.1-only connection keeps the profile but can offer only its own protocol
+        # an HTTP/1.1-only connection keeps the ClientHello but can offer only its own protocol
         names = tuple(protocol.value for protocol in protocols)
         return replace(
             self._tls,
@@ -483,7 +490,7 @@ class Client:
         http1_only: bool = False,
     ) -> Connection:
         try:
-            if quic:
+            if quic and self._http3 is not None:
                 memory = self._memory.setdefault(url.address, OriginMemory())
                 client = await QuicClient.connect(
                     self._context((NextProtocol.H3,)),
@@ -511,7 +518,10 @@ class Client:
                     proxy=proxy,
                 )
                 await self._checked(stream, url.authority)
-                if stream.negotiated_protocol() is NextProtocol.H2:
+                if (
+                    stream.negotiated_protocol() is NextProtocol.H2
+                    and self._http2 is not None
+                ):
                     connection = Http2Connection(stream, self._http2)
                     await connection.start()
                     return connection

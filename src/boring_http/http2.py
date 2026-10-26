@@ -8,7 +8,6 @@ from ssl2 import (
     AkamaiFingerprint,
     AsyncTransport,
     Http2Priority,
-    Http2Setting,
     Http2SettingIdentifier,
     PseudoHeader,
 )
@@ -78,7 +77,7 @@ class ErrorCode(IntEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class Http2Profile:
+class Http2Settings:
     fingerprint: AkamaiFingerprint
     headers_priority: Http2Priority | None = None
 
@@ -91,29 +90,6 @@ class Http2Profile:
             ),
             default,
         )
-
-
-CHROME_HTTP2 = Http2Profile(
-    AkamaiFingerprint(
-        settings=(
-            Http2Setting(Http2SettingIdentifier.HEADER_TABLE_SIZE, 65536),
-            Http2Setting(Http2SettingIdentifier.ENABLE_PUSH, 0),
-            Http2Setting(Http2SettingIdentifier.INITIAL_WINDOW_SIZE, 6291456),
-            Http2Setting(Http2SettingIdentifier.MAX_HEADER_LIST_SIZE, 262144),
-        ),
-        window_update=15663105,
-        priorities=(),
-        pseudo_header_order=(
-            PseudoHeader.METHOD,
-            PseudoHeader.AUTHORITY,
-            PseudoHeader.SCHEME,
-            PseudoHeader.PATH,
-        ),
-    ),
-    headers_priority=Http2Priority(
-        stream_id=0, exclusive=True, dependency=0, weight=256
-    ),
-)
 
 
 class Http2Stream:
@@ -156,15 +132,15 @@ class Http2Stream:
 
 
 class Http2Connection:
-    def __init__(self, transport: AsyncTransport, profile: Http2Profile) -> None:
+    def __init__(self, transport: AsyncTransport, settings: Http2Settings) -> None:
         self._transport = transport
-        self._profile = profile
+        self._local_settings = settings
         self._encoder = Encoder()
         self._decoder = Decoder(
-            profile.setting(
+            settings.setting(
                 Http2SettingIdentifier.HEADER_TABLE_SIZE, DEFAULT_TABLE_SIZE
             ),
-            profile.setting(
+            settings.setting(
                 Http2SettingIdentifier.MAX_HEADER_LIST_SIZE, DEFAULT_HEADER_LIST_SIZE
             ),
         )
@@ -177,10 +153,10 @@ class Http2Connection:
         self._peer_frame_size = DEFAULT_FRAME_SIZE
         self._peer_window = DEFAULT_WINDOW
         self._peer_max_streams = 2**31
-        self._local_window = profile.setting(
+        self._local_window = settings.setting(
             Http2SettingIdentifier.INITIAL_WINDOW_SIZE, DEFAULT_WINDOW
         )
-        self._connection_window = DEFAULT_WINDOW + profile.fingerprint.window_update
+        self._connection_window = DEFAULT_WINDOW + settings.fingerprint.window_update
         self._connection_received = 0
         self._goaway: int | None = None
         self._reader: asyncio.Task[None] | None = None
@@ -208,7 +184,7 @@ class Http2Connection:
         pass
 
     async def start(self) -> None:
-        fingerprint = self._profile.fingerprint
+        fingerprint = self._local_settings.fingerprint
         settings = b"".join(
             struct.pack("!HI", int(setting.identifier), setting.value)
             for setting in fingerprint.settings
@@ -241,9 +217,11 @@ class Http2Connection:
             Flag.END_STREAM if request.body is None else Flag(0)
         )
         payload = block
-        if self._profile.headers_priority is not None:
+        if self._local_settings.headers_priority is not None:
             flags |= Flag.PRIORITY
-            payload = self._priority_bytes(self._profile.headers_priority) + block
+            payload = (
+                self._priority_bytes(self._local_settings.headers_priority) + block
+            )
         try:
             async with deadline.phase("write"):
                 await self._write_headers(stream.identifier, payload, flags)
@@ -359,7 +337,8 @@ class Http2Connection:
             PseudoHeader.PATH: (b":path", request.url.target.encode()),
         }
         fields = [
-            pseudo[header] for header in self._profile.fingerprint.pseudo_header_order
+            pseudo[header]
+            for header in self._local_settings.fingerprint.pseudo_header_order
         ]
         if protocol is not None:
             fields.insert(1, (b":protocol", protocol))

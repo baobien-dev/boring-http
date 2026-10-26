@@ -48,7 +48,7 @@ from boring_http.quic.recovery import GRANULARITY, Recovery, SentPacket
 from boring_http.quic.streams import ReceiveStream, SendStream
 
 DATAGRAM_SIZE = 1200
-# RFC 9000 section 14.2: what a 1500 byte link carries under IPv6 and UDP headers; Chrome probes up to this size too
+# RFC 9000 section 14.2: what a 1500 byte link carries under IPv6 and UDP headers
 PROBED_DATAGRAM_SIZE = 1452
 TAG_LENGTH = 16
 SAMPLE_LENGTH = 16
@@ -117,40 +117,25 @@ NEVER_REMEMBERED = (
 
 @dataclass(frozen=True, slots=True)
 class TransportParameters:
-    max_idle_timeout: int = 30000
-    max_udp_payload_size: int = 1472
-    initial_max_data: int = 15728640
-    initial_max_stream_data_bidi_local: int = 6291456
-    initial_max_stream_data_bidi_remote: int = 6291456
-    initial_max_stream_data_uni: int = 6291456
-    initial_max_streams_bidi: int = 100
-    initial_max_streams_uni: int = 103
+    max_idle_timeout: int
+    max_udp_payload_size: int
+    initial_max_data: int
+    initial_max_stream_data_bidi_local: int
+    initial_max_stream_data_bidi_remote: int
+    initial_max_stream_data_uni: int
+    initial_max_streams_bidi: int
+    initial_max_streams_uni: int
+    order: tuple[Parameter, ...]
+    # RFC 9000 section 18.2 and RFC 9221 section 3: the values a peer assumes when a parameter is absent
     ack_delay_exponent: int = 3
     max_ack_delay: int = 25
-    active_connection_id_limit: int = 8
-    max_datagram_frame_size: int = 65536
-    # Chrome's connection option tags; a remembered round trip time goes out with them on a resumed connection
-    google_connection_options: tuple[bytes, ...] = (b"ORIG",)
+    active_connection_id_limit: int = 2
+    max_datagram_frame_size: int = 0
+    google_connection_options: tuple[bytes, ...] = ()
     initial_round_trip_time: int | None = None
-    grease: bool = True
-    grease_version: bool = True
-    shuffle: bool = True
-    # the set Chrome 155 sends: the parameters at their defaults and grease_quic_bit are left out
-    order: tuple[Parameter, ...] = (
-        Parameter.MAX_IDLE_TIMEOUT,
-        Parameter.MAX_UDP_PAYLOAD_SIZE,
-        Parameter.INITIAL_MAX_DATA,
-        Parameter.INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
-        Parameter.INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
-        Parameter.INITIAL_MAX_STREAM_DATA_UNI,
-        Parameter.INITIAL_MAX_STREAMS_BIDI,
-        Parameter.INITIAL_MAX_STREAMS_UNI,
-        Parameter.INITIAL_SOURCE_CONNECTION_ID,
-        Parameter.VERSION_INFORMATION,
-        Parameter.MAX_DATAGRAM_FRAME_SIZE,
-        Parameter.GOOGLE_CONNECTION_OPTIONS,
-        Parameter.INITIAL_ROUND_TRIP_TIME,
-    )
+    grease: bool = False
+    grease_version: bool = False
+    shuffle: bool = False
 
     def encode(
         self,
@@ -183,7 +168,7 @@ class TransportParameters:
             elif parameter is Parameter.VERSION_INFORMATION:
                 available: list[int] = list(versions)
                 if self.grease_version:
-                    # RFC 9368 section 2.1 / Chrome: a reserved version at a random place among the available ones
+                    # RFC 9368 section 2.1: a reserved version at a random place among the available ones
                     available.insert(
                         secrets.randbelow(len(available) + 1),
                         secrets.randbits(32) & 0xF0F0F0F0 | 0x0A0A0A0A,
@@ -204,7 +189,7 @@ class TransportParameters:
                 raise ValueError(f"{parameter.name} is not a parameter a client sends")
             pairs.append((parameter, value))
         if self.grease:
-            # RFC 9000 section 18.1: a reserved identifier the peer must ignore, drawn the way Chrome draws it
+            # RFC 9000 section 18.1: a reserved identifier the peer must ignore
             pairs.insert(
                 secrets.randbelow(len(pairs) + 1),
                 (
@@ -213,7 +198,6 @@ class TransportParameters:
                 ),
             )
         if self.shuffle:
-            # Chrome sends its transport parameters in a fresh random order on every connection
             secrets.SystemRandom().shuffle(pairs)
         for identifier, value in pairs:
             writer.varint(identifier)
