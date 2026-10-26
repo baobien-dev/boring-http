@@ -1203,6 +1203,17 @@ class QuicConnection:
             keys = self._keys.get(level)
             if keys is None or keys[1] is None:
                 continue
+            # after a Retry one Initial goes out until the server answers with its connection id, so a
+            # ClientHello in several packets reaches one server connection instead of one per datagram
+            if (
+                level is EncryptionLevel.INITIAL
+                and self._destination_id == self._retry_source
+                and any(
+                    packet.ack_eliciting
+                    for packet in self._recovery.space(level).sent.values()
+                )
+            ):
+                continue
             built = self._build_packet(level, keys[1], remaining, now, pad=False)
             if built is not None:
                 packets.append((level, built[0], built[1]))
