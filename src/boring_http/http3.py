@@ -1,6 +1,6 @@
 import asyncio
 import secrets
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -311,7 +311,7 @@ class Http3Connection:
         return (
             status,
             headers,
-            Http3StreamTransport(self._quic, stream_id, deadline, frames),
+            Http3StreamTransport(self._quic, stream_id, deadline, frames, self.close),
         )
 
     async def close(self) -> None:
@@ -531,12 +531,18 @@ class Http3Connection:
 
 class Http3StreamTransport:
     def __init__(
-        self, quic: QuicClient, stream_id: int, deadline: Deadline, frames: StreamFrames
+        self,
+        quic: QuicClient,
+        stream_id: int,
+        deadline: Deadline,
+        frames: StreamFrames,
+        close_connection: Callable[[], Awaitable[None]],
     ) -> None:
         self._quic = quic
         self._stream_id = stream_id
         self._frames = frames
         self._deadline = deadline
+        self._close_connection = close_connection
         self._pending = b""
         self._closed = False
 
@@ -564,3 +570,5 @@ class Http3StreamTransport:
         if not self._closed:
             self._closed = True
             self._quic.send(self._stream_id, b"", end=True)
+            # Client.websocket opens a connection for the tunnel alone, so the connection ends with it
+            await self._close_connection()

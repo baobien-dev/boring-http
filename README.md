@@ -445,7 +445,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Over HTTP/1.1 this is the Upgrade handshake. Over HTTP/2 and HTTP/3 it is Extended CONNECT when the server advertises `SETTINGS_ENABLE_CONNECT_PROTOCOL`, otherwise the client opens an HTTP/1.1 connection for it. `subprotocols=[...]` offers subprotocols; `websocket.subprotocol` is the one chosen. The `total` of `timeout` covers the handshake only; afterwards `read` and `write` still limit each wait, so `Timeout(read=None)` lets `receive()` wait through any silence.
+Over HTTP/1.1 this is the Upgrade handshake. Over HTTP/2 and HTTP/3 it is Extended CONNECT when the server advertises `SETTINGS_ENABLE_CONNECT_PROTOCOL`, otherwise the client opens an HTTP/1.1 connection for it. Each WebSocket has a connection of its own, which `close()` closes after the closing handshake. `subprotocols=[...]` offers subprotocols; `websocket.subprotocol` is the one chosen. The `total` of `timeout` covers the handshake only; afterwards `read` and `write` still limit each wait, so `Timeout(read=None)` lets `receive()` wait through any silence.
 
 ## uvloop
 

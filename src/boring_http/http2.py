@@ -687,4 +687,8 @@ class Http2StreamTransport:
     async def close(self) -> None:
         if not self._closed:
             self._closed = True
-            await self._connection.write_data(self._stream, b"", end=True)
+            # Client.websocket opens a connection for the tunnel alone, so the connection ends with it
+            try:
+                await self._connection.write_data(self._stream, b"", end=True)
+            finally:
+                await self._connection.close()
