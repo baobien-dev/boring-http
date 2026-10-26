@@ -1,0 +1,21 @@
+[project]
+name = "boring-http"
+version = "1.0.0"
+description = "Asyncio HTTP client on BoringSSL: HTTP/1.1, HTTP/2 and HTTP/3 over QUIC v1 and v2, WebSocket on all three, HTTP and SOCKS proxies, headers in your order"
+readme = "README.md"
+requires-python = ">=3.14.8"
+dependencies = [
+    "boring-ssl2",
+    "ssl2",
+]
+
+[project.urls]
+Repository = "https://github.com/baobien-dev/boring-http"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+ssl2 = { path = "../ssl2", editable = true }
+boring-ssl2 = { path = "../boring-ssl2", editable = true }

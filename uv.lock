@@ -1,0 +1,34 @@
+version = 1
+revision = 5
+requires-python = ">=3.14.8"
+
+[[package]]
+name = "boring-http"
+version = "1.0.0"
+source = { editable = "." }
+dependencies = [
+    { name = "boring-ssl2" },
+    { name = "ssl2" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "boring-ssl2", editable = "../boring-ssl2" },
+    { name = "ssl2", editable = "../ssl2" },
+]
+
+[[package]]
+name = "boring-ssl2"
+version = "1.0.0"
+source = { editable = "../boring-ssl2" }
+dependencies = [
+    { name = "ssl2" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "ssl2", editable = "../ssl2" }]
+
+[[package]]
+name = "ssl2"
+version = "1.0.0"
+source = { editable = "../ssl2" }
