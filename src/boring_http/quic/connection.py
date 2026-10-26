@@ -87,6 +87,8 @@ class Parameter(IntEnum):
     VERSION_INFORMATION = 0x11
     MAX_DATAGRAM_FRAME_SIZE = 0x20
     GREASE_QUIC_BIT = 0x2AB2
+    INITIAL_ROUND_TRIP_TIME = 0x3127
+    GOOGLE_CONNECTION_OPTIONS = 0x3128
 
 
 EARLY_DATA_LIMITS: Final = (
@@ -123,8 +125,13 @@ class TransportParameters:
     max_ack_delay: int = 25
     active_connection_id_limit: int = 8
     max_datagram_frame_size: int = 65536
+    # Chrome's connection option tags; a remembered round trip time goes out with them on a resumed connection
+    google_connection_options: tuple[bytes, ...] = (b"ORIG",)
+    initial_round_trip_time: int | None = None
     grease: bool = True
+    grease_version: bool = True
     shuffle: bool = True
+    # the set Chrome 155 sends: the parameters at their defaults and grease_quic_bit are left out
     order: tuple[Parameter, ...] = (
         Parameter.MAX_IDLE_TIMEOUT,
         Parameter.MAX_UDP_PAYLOAD_SIZE,
@@ -134,17 +141,19 @@ class TransportParameters:
         Parameter.INITIAL_MAX_STREAM_DATA_UNI,
         Parameter.INITIAL_MAX_STREAMS_BIDI,
         Parameter.INITIAL_MAX_STREAMS_UNI,
-        Parameter.ACK_DELAY_EXPONENT,
-        Parameter.MAX_ACK_DELAY,
-        Parameter.ACTIVE_CONNECTION_ID_LIMIT,
         Parameter.INITIAL_SOURCE_CONNECTION_ID,
         Parameter.VERSION_INFORMATION,
         Parameter.MAX_DATAGRAM_FRAME_SIZE,
-        Parameter.GREASE_QUIC_BIT,
+        Parameter.GOOGLE_CONNECTION_OPTIONS,
+        Parameter.INITIAL_ROUND_TRIP_TIME,
     )
 
     def encode(
-        self, source_connection_id: bytes, version: int, versions: tuple[int, ...]
+        self,
+        source_connection_id: bytes,
+        version: int,
+        versions: tuple[int, ...],
+        round_trip_time: int | None = None,
     ) -> bytes:
         writer = Writer()
         integers = {
@@ -168,11 +177,25 @@ class TransportParameters:
             elif parameter is Parameter.INITIAL_SOURCE_CONNECTION_ID:
                 value = source_connection_id
             elif parameter is Parameter.VERSION_INFORMATION:
+                available = list(versions)
+                if self.grease_version:
+                    # RFC 9368 section 2.1 / Chrome: a reserved version at a random place among the available ones
+                    available.insert(
+                        secrets.randbelow(len(available) + 1),
+                        secrets.randbits(32) & 0xF0F0F0F0 | 0x0A0A0A0A,
+                    )
                 value = b"".join(
-                    candidate.to_bytes(4, "big") for candidate in (version, *versions)
+                    candidate.to_bytes(4, "big") for candidate in (version, *available)
                 )
             elif parameter is Parameter.GREASE_QUIC_BIT:
                 value = b""
+            elif parameter is Parameter.GOOGLE_CONNECTION_OPTIONS:
+                value = b"".join(self.google_connection_options)
+            elif parameter is Parameter.INITIAL_ROUND_TRIP_TIME:
+                microseconds = self.initial_round_trip_time or round_trip_time
+                if microseconds is None:
+                    continue
+                value = Writer.encode_varint(microseconds)
             else:
                 raise ValueError(f"{parameter.name} is not a parameter a client sends")
             pairs.append((parameter, value))
@@ -294,6 +317,7 @@ class QuicConnection:
         version: int = QUIC_V1,
         token: bytes = b"",
         remembered: bytes = b"",
+        round_trip_time: int | None = None,
     ) -> None:
         self._version = version
         self._parameters = parameters
@@ -307,7 +331,7 @@ class QuicConnection:
         self._handshake = QuicHandshake(
             context,
             server_name,
-            parameters.encode(self._source_id, version, (version,)),
+            parameters.encode(self._source_id, version, (version,), round_trip_time),
             remembered,
         )
         self._recovery = Recovery(DATAGRAM_SIZE)
@@ -379,6 +403,10 @@ class QuicConnection:
         return (
             self._handshake.peer_transport_parameters if self._handshake_done else b""
         )
+
+    @property
+    def round_trip_time(self) -> int:
+        return int(self._recovery.smoothed_rtt * 1_000_000)
 
     @property
     def terminated(self) -> bool:

@@ -46,6 +46,7 @@ class OriginMemory:
     # what a later 0-RTT connection to the same origin runs under until the new handshake replaces it
     transport_parameters: bytes = b""
     settings: dict[int, int] = field(default_factory=dict[int, int])
+    round_trip_time: int = 0
 
 
 @final
@@ -172,6 +173,7 @@ class QuicClient:
                 version=version,
                 token=token,
                 remembered=b"" if memory is None else memory.transport_parameters,
+                round_trip_time=memory.round_trip_time or None if memory else None,
             )
             client = cls(connection, sock, relay, cls._offload_available(sock), memory)
             # with 0-RTT keys the first datagram waits for the request, so Initial and 0-RTT packets travel together
@@ -438,6 +440,7 @@ class QuicClient:
                         self._memory.transport_parameters = (
                             self._connection.peer_transport_parameters
                         )
+                        self._memory.round_trip_time = self._connection.round_trip_time
                     for future in (self._ready, self._handshake):
                         if not future.done():
                             future.set_result(None)

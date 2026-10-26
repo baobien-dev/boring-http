@@ -103,7 +103,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-The default is `versions=("h2", "h1")`. With `"h3"` in the list the client switches an origin to QUIC after an `Alt-Svc: h3` header and falls back to TCP when the QUIC route stops answering; `versions=("h3",)` goes straight to QUIC. Retry packets, version negotiation, loss recovery, pacing, flow control, key updates, QPACK with a 64 KiB dynamic table on the decoding side and 0-RTT are handled; connection migration is not. A second connection to an origin resumes the TLS session and sends GET, HEAD and OPTIONS requests before the handshake has finished, under the limits and SETTINGS the server gave last time; other methods wait for the handshake, a 425 answer is retried after it, and a server that declines the early data gets it again under the 1-RTT keys. The transport parameters go out in a fresh random order with a GREASE entry, as Chrome sends them.
+The default is `versions=("h2", "h1")`. With `"h3"` in the list the client switches an origin to QUIC after an `Alt-Svc: h3` header and falls back to TCP when the QUIC route stops answering; `versions=("h3",)` goes straight to QUIC. Retry packets, version negotiation, loss recovery, pacing, flow control, key updates, QPACK with a 64 KiB dynamic table on the decoding side and 0-RTT are handled; connection migration is not. A second connection to an origin resumes the TLS session and sends GET, HEAD and OPTIONS requests before the handshake has finished, under the limits and SETTINGS the server gave last time; other methods wait for the handshake, a 425 answer is retried after it, and a server that declines the early data gets it again under the 1-RTT keys. The transport parameters are Chrome 155's set, in a fresh random order with a GREASE entry, a GREASE version, Chrome's connection options and, on a resumed connection, the round trip time measured last time; `TransportParameters` on the `Http3Profile` changes any of it. The control stream carries SETTINGS with a GREASE entry, a GREASE frame, and a PRIORITY_UPDATE for every request that has a `priority` header, as Chrome sends them.
 
 ## Proxies
 
@@ -221,6 +221,82 @@ async def main() -> None:
         report = (await client.get("https://pingly.us.kg/api/all")).json()
         print(report["tls"]["ja4"] == JA4.of(profile).text, report["tls"]["ja4"])  # True t13d1516h2_8daaf6152771_d8a2da3f94cd
         print(report["http2"]["akamai_fingerprint"] == CHROME.fingerprint.text, report["http2"]["akamai_fingerprint"])  # True 1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p
+
+
+asyncio.run(main())
+```
+
+Over HTTP/3 the same holds, with the ClientHello Chrome 155 sends on QUIC: TLS 1.3 only, the `trust_anchors` extension with the 28 identifiers of Chrome's root store, and `pre_shared_key` once a session exists.
+
+```python
+import asyncio
+
+from boring_http import Client, Http3Profile
+from ssl2 import (
+    CHROME_TRUST_ANCHOR_IDS,
+    JA4,
+    CertificateCompressionAlgorithm,
+    CipherSuite,
+    ClientHelloBuilder,
+    ExtensionType,
+    JA4Transport,
+    NamedGroup,
+    NextProtocol,
+    ProtocolVersion,
+    PskKeyExchangeMode,
+    SignatureScheme,
+)
+
+quic_profile = (
+    ClientHelloBuilder()
+    .supported_versions(ProtocolVersion.TLS_1_3)
+    .cipher_suites(CipherSuite.TLS_AES_128_GCM_SHA256, CipherSuite.TLS_AES_256_GCM_SHA384, CipherSuite.TLS_CHACHA20_POLY1305_SHA256)
+    .extensions(
+        ExtensionType.signature_algorithms,
+        ExtensionType.application_settings,
+        ExtensionType.application_layer_protocol_negotiation,
+        ExtensionType.compress_certificate,
+        ExtensionType.trust_anchors,
+        ExtensionType.server_name,
+        ExtensionType.psk_key_exchange_modes,
+        ExtensionType.key_share,
+        ExtensionType.quic_transport_parameters,
+        ExtensionType.supported_versions,
+        ExtensionType.supported_groups,
+        ExtensionType.encrypted_client_hello,
+        ExtensionType.pre_shared_key,
+    )
+    .supported_groups(NamedGroup.X25519MLKEM768, NamedGroup.x25519, NamedGroup.secp256r1, NamedGroup.secp384r1)
+    .key_shares(NamedGroup.X25519MLKEM768, NamedGroup.x25519)
+    .signature_algorithms(
+        SignatureScheme.ecdsa_secp256r1_sha256,
+        SignatureScheme.rsa_pss_rsae_sha256,
+        SignatureScheme.rsa_pkcs1_sha256,
+        SignatureScheme.ecdsa_secp384r1_sha384,
+        SignatureScheme.rsa_pss_rsae_sha384,
+        SignatureScheme.rsa_pkcs1_sha384,
+        SignatureScheme.rsa_pss_rsae_sha512,
+        SignatureScheme.rsa_pkcs1_sha512,
+        SignatureScheme.rsa_pkcs1_sha1,
+    )
+    .application_protocols(NextProtocol.H3)
+    .application_settings(NextProtocol.H3)
+    .certificate_compression(CertificateCompressionAlgorithm.brotli)
+    .psk_key_exchange_modes(PskKeyExchangeMode.psk_dhe_ke)
+    .trust_anchor_ids(*CHROME_TRUST_ANCHOR_IDS)
+    .grease()
+    .permute_extensions()
+    .build()
+)
+
+
+async def main() -> None:
+    async with Client(versions=("h3",), http3=Http3Profile(tls=quic_profile), headers=[("priority", "u=0, i")]) as client:
+        _ = await client.get("https://pingly.us.kg/api/all")
+        await client.close()  # the next request opens a new connection, which resumes the session
+        report = (await client.get("https://pingly.us.kg/api/all")).json()
+        print(report["tls"]["ja4"] == JA4.of(quic_profile, JA4Transport.QUIC).text, report["tls"]["ja4"])  # True q13d0313h3_55b375c5d22e_b0954bf1abdf
+        print(report["http3"]["h3_text"])  # 1:65536;6:262144;7:100;51:1;GREASE|m,a,s,p
 
 
 asyncio.run(main())

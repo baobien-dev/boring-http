@@ -29,6 +29,7 @@ class FrameType(IntEnum):
     PUSH_PROMISE = 0x05
     GOAWAY = 0x07
     MAX_PUSH_ID = 0x0D
+    PRIORITY_UPDATE_REQUEST = 0xF0700
 
 
 class StreamType(IntEnum):
@@ -160,6 +161,7 @@ class Http3Connection:
         self._quic = quic
         self._profile = profile
         self._qpack = Qpack(profile.setting(Setting.QPACK_MAX_TABLE_CAPACITY, 0))
+        self._control_stream = -1
         self._decoder_stream = -1
         self._peer_settings: dict[int, int] = {}
         self._memory = memory
@@ -194,7 +196,7 @@ class Http3Connection:
         pass
 
     async def start(self) -> None:
-        control = self._quic.open_stream(bidirectional=False)
+        self._control_stream = self._quic.open_stream(bidirectional=False)
         writer = Writer()
         writer.varint(StreamType.CONTROL)
         settings = Writer()
@@ -211,7 +213,11 @@ class Http3Connection:
         writer.varint(FrameType.SETTINGS)
         writer.varint(len(settings))
         writer.put(settings.finish())
-        self._quic.send(control, writer.finish())
+        if self._profile.grease:
+            # RFC 9114 section 7.2.8: an empty frame of a reserved type right after SETTINGS, as Chrome sends it
+            writer.varint(0x1F * secrets.randbelow(1 << 32) + 0x21)
+            writer.varint(0)
+        self._quic.send(self._control_stream, writer.finish())
         self._quic.send(
             self._quic.open_stream(bidirectional=False),
             Writer.encode_varint(StreamType.QPACK_ENCODER),
@@ -247,6 +253,16 @@ class Http3Connection:
             await self._established(deadline)
         early = self._quic.connection.early_data_pending
         stream_id = self._quic.open_stream()
+        priority = request.headers.get("priority")
+        if priority is not None:
+            # RFC 9218 section 7.2: Chrome announces a request's priority on the control stream before its HEADERS
+            self._quic.send(
+                self._control_stream,
+                self._frame(
+                    FrameType.PRIORITY_UPDATE_REQUEST,
+                    Writer.encode_varint(stream_id) + priority.encode(),
+                ),
+            )
         block = self._qpack.encode(self._fields(request))
         self._quic.send(
             stream_id, self._frame(FrameType.HEADERS, block), end=request.body is None
