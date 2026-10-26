@@ -60,7 +60,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`response.cookies` holds only the cookies this response set; `client.cookies` is the jar that follows every request. `location`, `content_type`, `charset`, `content_length`, `content_encoding`, `retry_after`, `etag`, `last_modified` and `date` are parsed, `response.headers` keeps the raw fields in order, `raise_for_status()` raises `HTTPStatusError`.
+`response.cookies` holds only the cookies this response set; `client.cookies` is the jar that follows every request. A `Domain` that is a public suffix on the bundled Public Suffix List, such as `co.uk` or `github.io`, is refused unless it is the host itself, which then keeps the cookie to that host. `location`, `content_type`, `charset`, `content_length`, `content_encoding`, `retry_after`, `etag`, `last_modified` and `date` are parsed, `response.headers` keeps the raw fields in order, `raise_for_status()` raises `HTTPStatusError`.
 
 ## Streaming and timeouts
 

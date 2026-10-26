@@ -4,6 +4,16 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Self
 
+from boring_http.public_suffixes import EXCEPTIONS, RULES
+
+
+def is_public_suffix(domain: str) -> bool:
+    # publicsuffix.org's algorithm: an exception rule wins, then a listed rule or a wildcard over the parent, and an unlisted top-level label is one
+    if domain in EXCEPTIONS:
+        return False
+    parent = domain.partition(".")[2]
+    return domain in RULES or f"*.{parent}" in RULES or not parent
+
 
 @dataclass(frozen=True, slots=True)
 class Cookie:
@@ -46,6 +56,11 @@ class Cookie:
                     pass
         if domain and not (host == domain or host.endswith("." + domain)):
             return None
+        # RFC 6265 section 5.3 step 5: a public suffix as Domain is refused, unless it is the host itself, which keeps the cookie to that host
+        if domain and is_public_suffix(domain):
+            if domain != host:
+                return None
+            domain = ""
         if not path.startswith("/"):
             path = request_path[: request_path.rfind("/")] or "/"
         return cls(
