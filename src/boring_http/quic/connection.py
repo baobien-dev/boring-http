@@ -499,6 +499,29 @@ class QuicConnection:
         if end:
             stream.end()
 
+    def unsent(self, stream_id: int) -> int:
+        stream = self._send_streams.get(stream_id)
+        return 0 if stream is None else stream.unsent
+
+    def stream_read(self, stream_id: int, size: int) -> bool:
+        # the stream window opens again as the application takes data, so a reader that stops holds the server at one window
+        receive = self._receive_streams.get(stream_id)
+        if receive is None or receive.final_size is not None:
+            return False
+        receive.read += size
+        window = (
+            self._parameters.initial_max_stream_data_bidi_local
+            if stream_id % 4 < 2
+            else self._parameters.initial_max_stream_data_uni
+        )
+        if receive.max_data - receive.read >= window // 2:
+            return False
+        receive.max_data = receive.read + window
+        self._pending[EncryptionLevel.APPLICATION].append(
+            MaxStreamData(stream_id, receive.max_data)
+        )
+        return True
+
     def reset_stream(self, stream_id: int, error: int) -> None:
         stream = self._send_streams.get(stream_id)
         if stream is not None and not stream.reset_sent:
@@ -935,16 +958,6 @@ class QuicConnection:
             if data:
                 receive.chunks.append(data)
             self._readable[stream_id] = receive
-            window = (
-                self._parameters.initial_max_stream_data_bidi_local
-                if bidirectional
-                else self._parameters.initial_max_stream_data_uni
-            )
-            if receive.max_data - receive.consumed < window // 2 and not end:
-                receive.max_data = receive.consumed + window
-                self._pending[EncryptionLevel.APPLICATION].append(
-                    MaxStreamData(stream_id, receive.max_data)
-                )
             if end:
                 del self._receive_streams[stream_id]
         if (

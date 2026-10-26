@@ -24,6 +24,10 @@ class SendStream:
     def active(self) -> bool:
         return bool(self.pending) or (self.ended and not self.fin_sent)
 
+    @property
+    def unsent(self) -> int:
+        return sum(len(data) for _, data in self.pending) - self.position
+
     def write(self, data: bytes) -> None:
         if self.ended:
             raise ProtocolError(f"stream {self.stream_id} already ended")
@@ -90,6 +94,8 @@ class ReceiveStream:
         self.stream_id = stream_id
         self.max_data = max_data
         self.consumed = 0
+        # what the application has taken, which is what moves max_data
+        self.read = 0
         # in-order data the application has not been handed yet
         self.chunks: list[bytes] = []
         self.fragments: dict[int, bytes] = {}

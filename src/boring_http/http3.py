@@ -94,6 +94,8 @@ class Http3Settings:
 
 # RFC 8470 section 5.2: the requests a client may send before the handshake, since a server may see them twice
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# how much of a body may wait unsent in its QUIC stream before the next chunk is taken from the caller
+SEND_BUFFER = 1 << 20
 
 
 class StreamFrames:
@@ -266,6 +268,7 @@ class Http3Connection:
             async with deadline.phase("write"):
                 async for chunk in request.body.chunks():
                     self._quic.send(stream_id, self._frame(FrameType.DATA, chunk))
+                    await self._quic.drain(stream_id, SEND_BUFFER)
                 self._quic.send(stream_id, b"", end=True)
         frames = StreamFrames(self._quic, stream_id, deadline)
         status, headers = await self._response_head(frames, stream_id)
@@ -554,6 +557,8 @@ class Http3StreamTransport:
             + Writer.encode_varint(len(data))
             + data,
         )
+        async with self._deadline.phase("write"):
+            await self._quic.drain(self._stream_id, SEND_BUFFER)
 
     async def close(self) -> None:
         if not self._closed:

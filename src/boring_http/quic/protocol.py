@@ -135,6 +135,8 @@ class QuicClient:
         )
         self._inboxes: dict[int, Inbox] = {}
         self._unsent: deque[bytes] = deque()
+        # set after every flush, so a writer waiting for its stream to drain looks again
+        self._progress = asyncio.Event()
         self._closed = False
         self.incoming: asyncio.Queue[int] = asyncio.Queue()
         self.datagrams: asyncio.Queue[bytes] = asyncio.Queue()
@@ -261,7 +263,10 @@ class QuicClient:
         while True:
             if inbox.chunks:
                 chunks, inbox.chunks = inbox.chunks, []
-                return chunks[0] if len(chunks) == 1 else b"".join(chunks)
+                data = chunks[0] if len(chunks) == 1 else b"".join(chunks)
+                if self._connection.stream_read(stream_id, len(data)):
+                    self._flush_soon()
+                return data
             if inbox.error is not None:
                 raise inbox.error
             if inbox.ended:
@@ -269,6 +274,17 @@ class QuicClient:
             inbox.waiter = self._loop.create_future()
             await inbox.waiter
             inbox.waiter = None
+
+    async def drain(self, stream_id: int, limit: int) -> None:
+        # a writer waits while more than limit bytes of its stream are unsent, so a large body is never queued whole
+        while self._connection.unsent(stream_id) > limit:
+            inbox = self._inboxes.get(stream_id)
+            if inbox is not None and inbox.error is not None:
+                raise inbox.error
+            if self._terminated.done():
+                raise RemoteDisconnected("QUIC connection closed with data unsent")
+            self._progress.clear()
+            await self._progress.wait()
 
     def close(self, error: int = 0, reason: str = "") -> None:
         if not self._terminated.done():
@@ -385,6 +401,7 @@ class QuicClient:
                 # these count as lost, and the connection goes back to the size every path carries
                 self._connection.datagram_too_long()
             index = end
+        self._progress.set()
         self._dispatch()
         self._arm_timer()
         if len(datagrams) >= MAX_BURST and not self._unsent and self._pacer is None:
@@ -492,3 +509,4 @@ class QuicClient:
             inbox.wake()
         if not self._terminated.done():
             self._terminated.set_result(ConnectionTerminated(0, str(error), False))
+        self._progress.set()

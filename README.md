@@ -90,6 +90,8 @@ asyncio.run(main())
 
 A single number sets every phase and the total, so the request gives up after that many seconds whatever it was doing. With a `Timeout` the phases are separate: `connect` covers opening a connection, the proxy, TCP and the TLS or QUIC handshake included, `read` is the longest wait for the next bytes, `total` caps the whole exchange including redirects, and the error names whichever ran out.
 
+A body is held to what the application reads: over HTTP/2 and HTTP/3 the stream window opens again only as chunks are taken, so a response nobody reads stops at one window (`INITIAL_WINDOW_SIZE` or `initial_max_stream_data_bidi_local`), while the connection window keeps opening on arrival so other streams go on. An HTTP/3 upload keeps at most 1 MiB of the body unsent before it asks the body for the next chunk; HTTP/1.1 and HTTP/2 uploads wait on the socket and the peer's window.
+
 ## HTTP/3
 
 ```python

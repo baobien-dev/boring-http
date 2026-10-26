@@ -105,7 +105,8 @@ class Http2Stream:
         self.waiter: asyncio.Future[None] | None = None
         self.trailers = Headers()
         self.block = bytearray()
-        self.received = 0
+        # what the application took since the last WINDOW_UPDATE for this stream
+        self.consumed = 0
         self.finished = False
 
     def fail(self, error: BaseException) -> None:
@@ -382,7 +383,9 @@ class Http2Connection:
         try:
             while True:
                 if stream.chunks:
-                    yield stream.take()
+                    data = stream.take()
+                    await self.credit(stream, len(data))
+                    yield data
                 elif stream.error is not None:
                     raise stream.error
                 elif stream.finished:
@@ -406,6 +409,24 @@ class Http2Connection:
             await self._write(
                 self._frame(
                     FrameType.RST_STREAM, 0, stream.identifier, struct.pack("!I", code)
+                )
+            )
+
+    async def credit(self, stream: Http2Stream, size: int) -> None:
+        # the stream window opens again as the application takes data, so a reader that stops holds the server at one window
+        stream.consumed += size
+        if (
+            stream.consumed > self._local_window // 2
+            and not stream.finished
+            and not self.closed
+        ):
+            increment, stream.consumed = stream.consumed, 0
+            await self._write(
+                self._frame(
+                    FrameType.WINDOW_UPDATE,
+                    0,
+                    stream.identifier,
+                    struct.pack("!I", increment),
                 )
             )
 
@@ -512,15 +533,7 @@ class Http2Connection:
             if flags & END_STREAM:
                 stream.finished = True
             stream.wake()
-            stream.received += len(payload)
-            if stream.received > self._local_window // 2 and not stream.finished:
-                updates = self._frame(
-                    FrameType.WINDOW_UPDATE,
-                    0,
-                    identifier,
-                    struct.pack("!I", stream.received),
-                )
-                stream.received = 0
+        # the connection window opens on arrival, so one stream that is not read leaves the others their share
         self._connection_received += len(payload)
         if self._connection_received > self._connection_window // 2:
             updates += self._frame(
@@ -657,6 +670,7 @@ class Http2StreamTransport:
         while not self._pending:
             if stream.chunks:
                 self._pending = stream.take()
+                await self._connection.credit(stream, len(self._pending))
             elif stream.error is not None:
                 raise stream.error
             elif stream.finished:
