@@ -88,7 +88,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-A single number sets every phase and the total, so the request gives up after that many seconds whatever it was doing. With a `Timeout` the phases are separate: `read` is the longest wait for the next bytes, `total` caps the whole exchange including redirects, and the error names whichever ran out.
+A single number sets every phase and the total, so the request gives up after that many seconds whatever it was doing. With a `Timeout` the phases are separate: `connect` covers opening a connection, the proxy, TCP and the TLS or QUIC handshake included, `read` is the longest wait for the next bytes, `total` caps the whole exchange including redirects, and the error names whichever ran out.
 
 ## HTTP/3
 
@@ -443,7 +443,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Over HTTP/1.1 this is the Upgrade handshake. Over HTTP/2 and HTTP/3 it is Extended CONNECT when the server advertises `SETTINGS_ENABLE_CONNECT_PROTOCOL`, otherwise the client opens an HTTP/1.1 connection for it. `subprotocols=[...]` offers subprotocols; `websocket.subprotocol` is the one chosen.
+Over HTTP/1.1 this is the Upgrade handshake. Over HTTP/2 and HTTP/3 it is Extended CONNECT when the server advertises `SETTINGS_ENABLE_CONNECT_PROTOCOL`, otherwise the client opens an HTTP/1.1 connection for it. `subprotocols=[...]` offers subprotocols; `websocket.subprotocol` is the one chosen. The `total` of `timeout` covers the handshake only; afterwards `read` and `write` still limit each wait, so `Timeout(read=None)` lets `receive()` wait through any silence.
 
 ## uvloop
 

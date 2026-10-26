@@ -45,6 +45,9 @@ class Deadline:
     def phase(self, name: Phase) -> PhaseTimer:
         return PhaseTimer(self, name)
 
+    def drop_total(self) -> None:
+        self._end = None
+
     def limit(self, name: Phase) -> tuple[float | None, bool]:
         # the total budget wins when it leaves less time than the phase's own limit, and the error then names the total
         limit = self._limits[name]

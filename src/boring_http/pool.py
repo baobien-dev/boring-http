@@ -68,7 +68,8 @@ class Pool:
                 await limit.acquire()
                 await self._total.acquire()
             try:
-                connection = await self._connector(url, proxy, quic)
+                async with deadline.phase("connect"):
+                    connection = await self._connector(url, proxy, quic)
             except BaseException:
                 limit.release()
                 self._total.release()

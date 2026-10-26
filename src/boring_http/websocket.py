@@ -37,6 +37,8 @@ class WebSocket:
     ) -> None:
         self._transport = transport
         self._buffer = bytearray(leftover)
+        # the total covered the handshake; from here each read and write keeps only its phase limit
+        deadline.drop_total()
         self._deadline = deadline
         self._limit = max_message_size
         self._fragments: list[bytes] = []
