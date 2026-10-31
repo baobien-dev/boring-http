@@ -28,6 +28,11 @@ class Bits(IntEnum):
     CONTINUATION_LIMIT = 62
     BYTE = 8
     BYTE_MASK = 0xFF
+    NIBBLE = 4
+    NIBBLE_MASK = 0x0F
+    NIBBLES = 16
+    # RFC 7541 section 5.2: padding is the most significant bits of EOS, fewer than eight of them
+    PADDING_LIMIT = 7
     EOS = 256
 
 
@@ -89,7 +94,6 @@ class BlockReader:
     def __init__(self, data: bytes) -> None:
         self._data = data
         self._position = 0
-        self._decode_table = HuffmanTable.decoding()
 
     @property
     def remaining(self) -> int:
@@ -136,34 +140,90 @@ class BlockReader:
         return value
 
     def huffman(self, data: bytes) -> bytes:
+        # four bits at a time through the code tree; a step emits at most one symbol
+        transitions, accepting = HuffmanTable.transitions()
+        state = 0
         out = bytearray()
-        code, length = 0, 0
-        table = self._decode_table
         for byte in data:
-            for bit in range(Bits.BYTE - 1, -1, -1):
-                code = (code << 1) | ((byte >> bit) & 1)
-                length += 1
-                symbol = table.get((length, code))
-                if symbol is not None:
-                    if symbol == Bits.EOS:
-                        raise ProtocolError("EOS inside HPACK Huffman data")
-                    out.append(symbol)
-                    code, length = 0, 0
-        # RFC 7541 section 5.2: at most seven bits of padding, all ones
-        if length >= Bits.BYTE or code != (1 << length) - 1:
+            state, emitted, failed = transitions[state][byte >> Bits.NIBBLE]
+            if failed:
+                raise ProtocolError("invalid HPACK Huffman data")
+            if emitted:
+                out.append(emitted - 1)
+            state, emitted, failed = transitions[state][byte & Bits.NIBBLE_MASK]
+            if failed:
+                raise ProtocolError("invalid HPACK Huffman data")
+            if emitted:
+                out.append(emitted - 1)
+        if not accepting[state]:
             raise ProtocolError("invalid HPACK Huffman padding")
         return bytes(out)
 
 
 class HuffmanTable:
-    # (bit length, code) to symbol, built once from the code table
-    _decoding: dict[tuple[int, int], int] | None = None
+    # RFC 7541 appendix B as a state machine: a state is a position in the code tree, a nibble leads to the next
+    # position and completes at most one symbol, since the shortest code is five bits long. Built once.
+    LEAF = 1 << 10
+    _transitions: list[list[tuple[int, int, bool]]] | None = None
+    _accepting: list[bool] | None = None
 
     @classmethod
-    def decoding(cls) -> dict[tuple[int, int], int]:
-        if cls._decoding is None:
-            cls._decoding = {(length, code): symbol for symbol, (code, length) in enumerate(HpackTables.HUFFMAN)}
-        return cls._decoding
+    def transitions(cls) -> tuple[list[list[tuple[int, int, bool]]], list[bool]]:
+        # per state and nibble: the next state, the symbol completed plus one or zero, and whether the path failed;
+        # per state: whether ending there is valid padding
+        if cls._transitions is None or cls._accepting is None:
+            children = cls._tree()
+            cls._transitions = [
+                [cls._step(children, state, nibble) for nibble in range(Bits.NIBBLES)] for state in range(len(children))
+            ]
+            cls._accepting = cls._padding_states(children)
+        return cls._transitions, cls._accepting
+
+    @classmethod
+    def _tree(cls) -> list[list[int]]:
+        # node 0 is the root; each node holds its child per bit, a child at or above LEAF being a symbol
+        children: list[list[int]] = [[-1, -1]]
+        for symbol, (code, length) in enumerate(HpackTables.HUFFMAN):
+            node = 0
+            for position in range(length - 1, 0, -1):
+                bit = (code >> position) & 1
+                if children[node][bit] < 0:
+                    children[node][bit] = len(children)
+                    children.append([-1, -1])
+                node = children[node][bit]
+            children[node][code & 1] = cls.LEAF + symbol
+        return children
+
+    @classmethod
+    def _step(cls, children: list[list[int]], state: int, nibble: int) -> tuple[int, int, bool]:
+        node = state
+        emitted = 0
+        for position in range(Bits.NIBBLE - 1, -1, -1):
+            child = children[node][(nibble >> position) & 1]
+            if child < 0:
+                return 0, 0, True
+            if child < cls.LEAF:
+                node = child
+                continue
+            symbol = child - cls.LEAF
+            if symbol == Bits.EOS:
+                return 0, 0, True
+            emitted = symbol + 1
+            node = 0
+        return node, emitted, False
+
+    @classmethod
+    def _padding_states(cls, children: list[list[int]]) -> list[bool]:
+        # a string may end at the root or up to seven one-bits down from it
+        accepting = [False] * len(children)
+        accepting[0] = True
+        node = 0
+        for _ in range(Bits.PADDING_LIMIT):
+            node = children[node][1]
+            if node < 0 or node >= cls.LEAF:
+                break
+            accepting[node] = True
+        return accepting
 
 
 class StaticTable:
