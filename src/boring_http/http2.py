@@ -105,6 +105,8 @@ class Http2Stream:
         # what the application took since the last WINDOW_UPDATE for this stream
         self.consumed = 0
         self.finished = False
+        # RFC 9113 section 6.2: END_STREAM rides on the HEADERS frame, while END_HEADERS may come on a CONTINUATION
+        self.ends_after_headers = False
 
     def fail(self, error: BaseException) -> None:
         if not self.headers.done():
@@ -273,7 +275,8 @@ class Http2Connection:
         view = memoryview(data)
         while True:
             allowance = min(len(view), stream.send_window, self._send_window)
-            if view and allowance == 0:
+            # a SETTINGS that lowers the initial window can take a stream's window below zero
+            if view and allowance <= 0:
                 stream.window_changed.clear()
                 self._window_changed.clear()
                 waiters = {
@@ -532,6 +535,7 @@ class Http2Connection:
             return
         if kind is FrameType.HEADERS:
             stream.block = bytearray()
+            stream.ends_after_headers = bool(flags & Flag.END_STREAM)
         stream.block += payload
         if not flags & Flag.END_HEADERS:
             return
@@ -557,7 +561,7 @@ class Http2Connection:
         else:
             for header in regular:
                 stream.trailers.append(header)
-        if flags & Flag.END_STREAM:
+        if stream.ends_after_headers:
             stream.finished = True
             stream.wake()
 
