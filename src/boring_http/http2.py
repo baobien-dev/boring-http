@@ -409,7 +409,11 @@ class Http2Connection:
                 if isinstance(error, (RemoteDisconnectedError, ProtocolError))
                 else RemoteDisconnectedError(str(error))
             )
-            self.logger.warning("%s version=%s error=%s", Event.CONNECTION_FAILED, HTTPVersion.HTTP_2, failure)
+            if self._streams or not self._settings_received.done():
+                self.logger.warning("%s version=%s error=%s", Event.CONNECTION_FAILED, HTTPVersion.HTTP_2, failure)
+            else:
+                # a server closing an idle connection is the usual end of one, not a failure
+                self.logger.info("%s version=%s reason=%s", Event.CONNECTION_CLOSED, HTTPVersion.HTTP_2, failure)
             if not self._settings_received.done():
                 self._settings_received.set_exception(failure)
             for stream in list(self._streams.values()):

@@ -580,9 +580,15 @@ class QuicClient:
                     pass
 
     def _fail(self, error: BaseException) -> None:
-        # a close this side asked for ends the streams the same way, but is nothing to warn about
-        if not self._closing_locally:
+        # a close this side asked for, or a peer's close of an idle connection, ends the streams the same way but is
+        # nothing to warn about; a close someone was waiting on is
+        waited = not self._ready.done() or any(inbox.waiter is not None for inbox in self._inboxes.values())
+        if self._closing_locally:
+            pass
+        elif waited:
             self.logger.warning("%s version=h3 error=%s", Event.CONNECTION_FAILED, error)
+        else:
+            self.logger.info("%s version=h3 reason=%s", Event.CONNECTION_CLOSED, error)
         for future in (self._ready, self._handshake):
             if not future.done():
                 future.set_exception(error)
