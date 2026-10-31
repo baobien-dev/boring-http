@@ -521,14 +521,29 @@ uvloop.run(main())
 
 Every path runs unchanged on uvloop, QUIC included. On Windows' default event loop, which signals no socket readiness, QUIC runs on a datagram endpoint instead of the raw socket.
 
-## Load
+## Performance
 
-Against a Go server on loopback, Python 3.14.8 on Linux, one client with 256 requests in flight and 64 connections to the host:
+Against a Go server (net/http and quic-go) on loopback, Python 3.14.8 on Linux, one process per measurement. `seq` is 1000 requests one after another on one connection, `conc` 1000 requests with 32 in flight, `heavy` 2000 requests with 64 in flight mixing a small GET, a 64 KB GET and a 1 KB POST as a page load does, `download` one 50 MB GET, `upload` one 20 MB POST, `loss` a 20 MB GET through a relay dropping 5% of the datagrams each way. Requests per second for the first nine rows, MB/s for the rest; `-` is a protocol the client does not speak.
 
-| version | 20000 small requests | 32 parallel 20 MB downloads | 16 parallel 10 MB uploads |
-| --- | ---: | ---: | ---: |
-| HTTP/1.1 | 8752 req/s | 982 MB/s | 2350 MB/s |
-| HTTP/2 | 9553 req/s | 347 MB/s | 1183 MB/s |
-| HTTP/3 | 4904 req/s | 174 MB/s | 95 MB/s |
+| scenario | boring-http | boring-http+uvloop | wreq | curl_cffi | pycurl | aioquic | httpx | aiohttp | requests |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| h1-seq | 10356 | 10613 | 18206 | 6920 | 30037 | - | 2180 | 12554 | 3321 |
+| h2-seq | 6487 | 6898 | 12685 | 5318 | 16639 | - | 1682 | - | - |
+| h3-seq | 3555 | 3627 | - | 4840 | 14154 | 6777 | - | - | - |
+| h1-conc | 10718 | 9929 | 71668 | 11214 | 32329 | - | 899 | 23208 | 2443 |
+| h2-conc | 14246 | 17030 | 43825 | 11274 | 30840 | - | 2047 | - | - |
+| h3-conc | 8165 | 8255 | - | 11719 | 31401 | 8128 | - | - | - |
+| h1-heavy | 8111 | 7955 | 32752 | 8469 | 18744 | - | 750 | 13431 | 1952 |
+| h2-heavy | 9079 | 9534 | 22780 | 8988 | 17037 | - | 1432 | - | - |
+| h3-heavy | 4786 | 4768 | - | 8102 | 12177 | 1802 | - | - | - |
+| h1-download | 732 | 763 | 871 | 864 | 1028 | - | 286 | 1031 | 655 |
+| h2-download | 335 | 357 | 449 | timed out | 459 | - | 130 | - | - |
+| h3-download | 182 | 187 | - | 516 | 506 | 65 | - | - | - |
+| h1-upload | 2911 | 2826 | 3603 | 2154 | 2033 | - | 773 | 750 | 2387 |
+| h2-upload | 1040 | 927 | 2229 | 1485 | 1350 | - | 190 | - | - |
+| h3-upload | 102 | 106 | - | 683 | 447 | 50 | - | - | - |
+| h3-loss | 35 | 36 | - | 54 | 54 | 4 | - | - | - |
 
-HTTP/1.1 and HTTP/2 are Python framing over BoringSSL records. HTTP/3 is a QUIC stack in Python with BoringSSL doing the cryptography, which is where its gap comes from. The same code holds a thousand open clients per version and keeps going through 5% datagram loss on the QUIC path.
+The round trip of one small request is 0.10 ms on HTTP/1.1, 0.15 ms on HTTP/2 and 0.28 ms on HTTP/3 at the median, against 0.03 ms for pycurl. The client process peaks at 62 to 67 MB of RSS on the request scenarios and holds the body in memory on a download, as every client here does.
+
+wreq is Rust and pycurl is libcurl in C: one call does the whole request in compiled code and Python only waits. Here BoringSSL does the cryptography and everything else, the HTTP framing, the headers, the pool, the timeouts and the asyncio futures, runs as Python, about 90 µs of CPU per HTTP/1.1 request. HTTP/3 is a QUIC stack in Python on top of that. The same code holds a thousand clients on their own threads and event loops, a thousand clients on one loop, 20000 requests with 256 in flight, and keeps a flat memory footprint over thousands of connections.
