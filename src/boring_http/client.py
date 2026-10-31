@@ -1,5 +1,7 @@
+import ipaddress
 import logging
 import os
+import socket
 from collections.abc import AsyncGenerator, AsyncIterable, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -16,16 +18,19 @@ from ssl2.errors import ConfigurationError, ProxyError, TLSError
 from ssl2.interface import SessionCache, TLSClientConfiguration
 from ssl2.proxy import Proxy, ProxyCredentials, ProxyScheme
 from ssl2.registry import ExtensionType, NextProtocol
+from ssl2.tracing import Phase as TracePhase
 from ssl2.tracing import Trace
 
 from boring_http.codings import ContentCoding
 from boring_http.cookies import CookieJar
+from boring_http.dns import Resolver, SystemResolver
 from boring_http.errors import (
     ConnectError,
     HTTPError,
     ProtocolError,
     RemoteDisconnectedError,
     RequestTimeoutError,
+    ResolveError,
     RevocationError,
     StreamRefusedError,
     TooManyRedirectsError,
@@ -103,6 +108,7 @@ class Client:
         check_peer: Callable[[tuple[bytes, ...], str], Awaitable[None]] | None = None,
         key_log: str | os.PathLike[str] | None = None,
         resolve: Mapping[tuple[str, int], tuple[str, int]] | None = None,
+        resolver: Resolver | None = None,
         cookies: CookieJar | None = None,
         base_url: str | None = None,
         max_connections: int = Limit.CONNECTIONS,
@@ -140,6 +146,7 @@ class Client:
         self._check_peer = check_peer
         self._key_log = key_log
         self._resolve = {} if resolve is None else dict(resolve)
+        self._resolver = SystemResolver() if resolver is None else resolver
         self._base_url = None if base_url is None else Url.parse(base_url)
         self._max_redirects = max_redirects
         self._max_message_size = max_message_size
@@ -448,31 +455,87 @@ class Client:
             await self._check_peer(chain, authority)
 
     async def _fetch_crl(self, url: str) -> bytes:
+        # the CRL is fetched the way this client resolves names, so no lookup goes past the resolver it was given
         async with Client(
-            versions=(HTTPVersion.HTTP_1,), revocation=Revocation.NONE, timeout=Limit.CRL_TIMEOUT, library=self._library
+            versions=(HTTPVersion.HTTP_1,),
+            revocation=Revocation.NONE,
+            timeout=Limit.CRL_TIMEOUT,
+            resolver=self._resolver,
+            library=self._library,
         ) as inner:
             return (await inner.get(url)).body
 
     async def _connect(
         self, url: Url, proxy: Proxy | None, *, quic: bool, trace: Trace | None, http1_only: bool = False
     ) -> Connection:
-        # a resolve entry sends a direct connection elsewhere, while the URL's host stays the name sent and verified
-        address = self._resolve.get(url.address, url.address) if proxy is None else url.address
+        addresses = await self._addresses(url, proxy, trace)
         try:
-            if quic and self._http3 is not None:
-                return await self._connect_quic(url, address, proxy, self._http3, trace)
-            if url.secure:
-                return await self._connect_tls(url, address, proxy, trace, http1_only=http1_only)
-            if proxy is not None and proxy.scheme in (ProxyScheme.HTTP, ProxyScheme.HTTPS):
-                return await self._connect_forward_proxy(proxy, trace)
-            tunnel = await TLSStream.tunnel(self._context(None), address, proxy, trace)
-            return Http1Connection(tunnel.transport, self._http1, self._library, leftover=tunnel.leftover)
+            # an address that fails at the socket or in QUIC passes to the next; the last one's failure is the error
+            for address in addresses[:-1]:
+                try:
+                    return await self._connect_to(url, address, proxy, quic=quic, trace=trace, http1_only=http1_only)
+                except ProxyError, RevocationError:
+                    raise
+                except (OSError, ConnectError) as error:
+                    # an address passed over while others remain is routine, so it is a line for the record, not a warning
+                    self.logger.info(
+                        "%s host=%s address=%s error=%s", Event.CONNECTION_FAILED, url.host, address[0], error
+                    )
+            return await self._connect_to(url, addresses[-1], proxy, quic=quic, trace=trace, http1_only=http1_only)
         except ProxyError, ConfigurationError, RevocationError:
             raise
         except TLSError as error:
             raise ConnectError(f"the TLS handshake with {url.authority} failed: {error}") from error
         except OSError as error:
             raise ConnectError(f"cannot connect to {url.authority}: {error}") from error
+
+    async def _addresses(self, url: Url, proxy: Proxy | None, trace: Trace | None) -> tuple[tuple[str, int], ...]:
+        # a proxy that resolves names itself is handed the name; a resolve entry pins the address; the resolver
+        # answers the rest, IPv4 only for a proxy that carries nothing else
+        family = None if proxy is None else proxy.scheme.local_address_family
+        if proxy is not None and family is None:
+            return (url.address,)
+        pinned = self._resolve.get(url.address)
+        if pinned is not None:
+            return (pinned,)
+        started = monotonic()
+        with Trace.timing(trace, TracePhase.RESOLVE):
+            addresses = await self._resolver.resolve(url.host, url.port)
+        if family == socket.AF_INET:
+            addresses = tuple(
+                address for address in addresses if isinstance(ipaddress.ip_address(address[0]), ipaddress.IPv4Address)
+            )
+        if not addresses:
+            raise ResolveError(f"{url.host} resolves to no address")
+        self.logger.info(
+            "%s host=%s port=%d addresses=%d seconds=%.3f",
+            Event.RESOLVED,
+            url.host,
+            url.port,
+            len(addresses),
+            monotonic() - started,
+        )
+        return addresses
+
+    async def _connect_to(
+        self,
+        url: Url,
+        address: tuple[str, int],
+        proxy: Proxy | None,
+        *,
+        quic: bool,
+        trace: Trace | None,
+        http1_only: bool,
+    ) -> Connection:
+        # the address is where the packets go, while the URL's host stays the name sent and verified
+        if quic and self._http3 is not None:
+            return await self._connect_quic(url, address, proxy, self._http3, trace)
+        if url.secure:
+            return await self._connect_tls(url, address, proxy, trace, http1_only=http1_only)
+        if proxy is not None and proxy.scheme in (ProxyScheme.HTTP, ProxyScheme.HTTPS):
+            return await self._connect_forward_proxy(proxy, trace)
+        tunnel = await TLSStream.tunnel(self._context(None), address, proxy, trace)
+        return Http1Connection(tunnel.transport, self._http1, self._library, leftover=tunnel.leftover)
 
     async def _connect_quic(
         self, url: Url, address: tuple[str, int], proxy: Proxy | None, profile: Http3Profile, trace: Trace | None

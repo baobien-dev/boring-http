@@ -3,12 +3,14 @@ from ssl2.proxy import Proxy, ProxyCredentials, ProxyScheme
 
 from boring_http.client import Client
 from boring_http.cookies import Cookie, CookieJar
+from boring_http.dns import DnsCache, DnsResolver, DohResolver, Resolver, SystemResolver
 from boring_http.errors import (
     ConnectError,
     HTTPError,
     ProtocolError,
     RemoteDisconnectedError,
     RequestTimeoutError,
+    ResolveError,
     RevocationError,
     StreamRefusedError,
     StreamResetError,
@@ -32,6 +34,9 @@ __all__ = (
     "ConnectionInfo",
     "Cookie",
     "CookieJar",
+    "DnsCache",
+    "DnsResolver",
+    "DohResolver",
     "HTTPError",
     "HTTPStatusError",
     "HTTPVersion",
@@ -51,12 +56,15 @@ __all__ = (
     "RemoteDisconnectedError",
     "Request",
     "RequestTimeoutError",
+    "ResolveError",
+    "Resolver",
     "Response",
     "Revocation",
     "RevocationError",
     "Scheme",
     "StreamRefusedError",
     "StreamResetError",
+    "SystemResolver",
     "Timeout",
     "TooManyRedirectsError",
     "TransportParameters",

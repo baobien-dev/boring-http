@@ -319,11 +319,11 @@ class QuicClient:
             if proxy is not None:
                 with Trace.timing(trace, Phase.PROXY):
                     relay = await SocksRelay.open(proxy, address)
+            # the client resolved the name already; this lookup turns the literal into a socket address and family
             target = address if relay is None else relay.address
-            with Trace.timing(trace, Phase.RESOLVE):
-                family, kind, protocol, _, resolved = (
-                    await loop.getaddrinfo(target[0], target[1], type=socket.SOCK_DGRAM)
-                )[0]
+            family, kind, protocol, _, resolved = (
+                await loop.getaddrinfo(target[0], target[1], type=socket.SOCK_DGRAM)
+            )[0]
             sock = cls._open_socket(family, kind, protocol)
             sock.connect(resolved)
             connection = QuicConnection(
