@@ -54,6 +54,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tools/*" = ["INP001", "T201"]  # standalone scripts that report to the person running them
+"src/boring_http/websocket.py" = ["S324"]  # RFC 6455 section 4.2.2 fixes SHA-1 for the accept key
 
 [tool.basedpyright]
 typeCheckingMode = "strict"
