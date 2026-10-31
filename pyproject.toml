@@ -52,6 +52,9 @@ ignore = [
     "TRY003",  # a message is written in the raise
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"tools/*" = ["INP001", "T201"]  # standalone scripts that report to the person running them
+
 [tool.basedpyright]
 typeCheckingMode = "strict"
 reportImplicitOverride = true
