@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from time import monotonic
 from typing import Protocol
@@ -14,6 +14,11 @@ from boring_http.response import ConnectionInfo, Response
 from boring_http.timing import Deadline, Phase
 from boring_http.tracing import Event
 from boring_http.url import Scheme, Url
+
+
+class Connector(Protocol):
+    # opens a connection to the URL's origin, through the proxy, over QUIC when asked
+    async def __call__(self, url: Url, proxy: Proxy | None, *, quic: bool, trace: Trace | None) -> Connection: ...
 
 
 class Connection(Protocol):
@@ -57,7 +62,7 @@ class Pool:
 
     def __init__(
         self,
-        connector: Callable[[Url, Proxy | None, bool, Trace | None], Awaitable[Connection]],
+        connector: Connector,
         max_connections: int,
         max_connections_per_host: int,
         max_idle_time: float | None,
@@ -103,7 +108,7 @@ class Pool:
             try:
                 started = monotonic()
                 async with deadline.phase(Phase.CONNECT):
-                    connection = await self._connector(url, proxy, quic, trace)
+                    connection = await self._connector(url, proxy, quic=quic, trace=trace)
                 connection.connect_time = monotonic() - started
             except BaseException:
                 limit.release()

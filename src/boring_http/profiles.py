@@ -6,7 +6,7 @@ from boring_ssl2 import QuicVersion
 from ssl2.client_hello import ClientHello
 from ssl2.errors import ConfigurationError
 from ssl2.fingerprint import AkamaiFingerprint, Http2Priority, PseudoHeader
-from ssl2.registry import Http2SettingIdentifier
+from ssl2.registry import Http2SettingIdentifier, NextProtocol
 from ssl2.value import Value
 
 from boring_http.quic.parameters import Parameter, TransportParameters
@@ -31,6 +31,17 @@ class HTTPVersion(StrEnum):
                 return cls.HTTP_3
             case _:
                 return None
+
+    @property
+    def alpn(self) -> NextProtocol:
+        # the protocol name offered in the TLS handshake for this version
+        match self:
+            case HTTPVersion.HTTP_1:
+                return NextProtocol.HTTP1
+            case HTTPVersion.HTTP_2:
+                return NextProtocol.H2
+            case HTTPVersion.HTTP_3:
+                return NextProtocol.H3
 
 
 class Size(IntEnum):

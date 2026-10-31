@@ -55,6 +55,10 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tools/*" = ["INP001", "T201"]  # standalone scripts that report to the person running them
 "src/boring_http/websocket.py" = ["S324"]  # RFC 6455 section 4.2.2 fixes SHA-1 for the accept key
+"src/boring_http/client.py" = ["ASYNC109"]  # timeout= is the request's per-phase Timeout, not one wait
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["boring_http.timing.Timeout"]  # a frozen value, so it may be a default argument
 
 [tool.basedpyright]
 typeCheckingMode = "strict"
