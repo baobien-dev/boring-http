@@ -4,6 +4,24 @@ All notable changes to boring-http. The format is [Keep a Changelog](https://kee
 
 ## [Unreleased]
 
+The client was written again from the ground up. What a program sees:
+
+### Changed
+
+- `URL` is `Url`, `Headers` holds `Header`s, `Http2Settings` and `Http3Settings` are `Http2Profile` and `Http3Profile`, `Setting` is `Http3Setting`, and HTTP/1.1 gets an `Http1Profile` for the Host position and the read limits. Every one prints as `Name(field=...)` and `dict()` takes it apart.
+- The errors end in Error: `RemoteDisconnectedError`, `StreamRefusedError`, `RequestTimeoutError` (still a `TimeoutError`), `TooManyRedirectsError`, `WebSocketClosedError`. A mistaken argument raises `ConfigurationError` from `ssl2`; a URL that does not parse raises `ParseError`, a `ValueError` too.
+- `client.cookies.header(host, path, secure=...)` takes the flag as a keyword.
+- A server's malformed header is a `ProtocolError` on every version.
+- Only a peer's close is logged as a connection failure.
+
+### Added
+
+- `trace=True` on `Client`: every response carries a `Trace` with the connect, proxy, handshake, pool, send, headers and body spans, and `print(response.trace)` shows them.
+- `library=` on `Client`: a BoringSSL build of your own, through `boring_ssl2.Library(path)`.
+- The `boring_http` logger reports connections, requests, responses, redirects, retries, Alt-Svc, QUIC handshakes, losses and closes, and WebSockets.
+- On Windows' default event loop, which signals no socket readiness, QUIC runs on an asyncio datagram endpoint.
+- `Method`, `Scheme`, `Proxy`, `ProxyCredentials` and `ProxyScheme` are exported.
+
 ## [2.5.1] - 2026-10-27
 
 - After a Retry, the rest of a multi-packet ClientHello waits for the server's connection id.
