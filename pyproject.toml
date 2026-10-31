@@ -3,6 +3,8 @@ name = "boring-http"
 version = "0.1.0"
 description = "Asyncio HTTP client on BoringSSL: HTTP/1.1, HTTP/2 and HTTP/3 over QUIC, WebSocket on all three, HTTP and SOCKS proxies, headers in your order"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [
     { name = "Huynh Bao Bien", email = "276976028+baobien-dev@users.noreply.github.com" }
 ]
