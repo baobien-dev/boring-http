@@ -83,19 +83,21 @@ class Pool:
         self, url: Url, proxy: Proxy | None, deadline: Deadline, *, quic: bool = False, trace: Trace | None = None
     ) -> Connection:
         key = PoolKey.of(url, proxy, quic=quic)
+        # the usual case first: an idle connection is taken without the lock, since nothing on this path awaits
+        reused = self._idle(key)
+        if reused is not None:
+            return reused
         limit = self._limits.setdefault(key, asyncio.Semaphore(self._per_host))
         changed = self._changes.setdefault(key, asyncio.Event())
         async with self._locks.setdefault(key, asyncio.Lock()):
             while True:
-                for connection in list(self._connections.get(key, [])):
-                    if self._expired(connection):
-                        await connection.close()
-                    elif connection.available:
-                        connection.take()
-                        connection.reused = True
-                        self._in_use[connection] += 1
-                        self.logger.debug("%s host=%s port=%d", Event.CONNECTION_REUSED, url.host, url.port)
-                        return connection
+                for connection in [
+                    connection for connection in self._connections.get(key, []) if self._expired(connection)
+                ]:
+                    await connection.close()
+                reused = self._idle(key)
+                if reused is not None:
+                    return reused
                 if not limit.locked() and not self._total.locked():
                     break
                 # every connection is busy and no new one may open: wait for a stream to finish or a connection to close
@@ -127,6 +129,16 @@ class Pool:
                 connection.connect_time,
             )
             return connection
+
+    def _idle(self, key: PoolKey) -> Connection | None:
+        for connection in self._connections.get(key, ()):
+            if connection.available and not self._expired(connection):
+                connection.take()
+                connection.reused = True
+                self._in_use[connection] += 1
+                self.logger.debug("%s host=%s port=%d", Event.CONNECTION_REUSED, key.host, key.port)
+                return connection
+        return None
 
     async def close(self) -> None:
         for connections in list(self._connections.values()):
