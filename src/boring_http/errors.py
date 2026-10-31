@@ -14,6 +14,11 @@ class RevocationError(ConnectError):
     pass
 
 
+class ResolveError(ConnectError):
+    # a name no resolver turned into an address
+    pass
+
+
 class RemoteDisconnectedError(ConnectError):
     pass
 
