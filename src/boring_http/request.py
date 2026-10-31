@@ -32,6 +32,11 @@ class Method(StrEnum):
         # the methods a Content-Length of zero is sent for when there is no body at all
         return self in (Method.POST, Method.PUT, Method.PATCH)
 
+    @property
+    def safe(self) -> bool:
+        # RFC 9110 section 9.2.1; RFC 8470 section 5.2 lets these go out in 0-RTT, since a server may see them twice
+        return self in (Method.GET, Method.HEAD, Method.OPTIONS)
+
 
 class ContentType(StrEnum):
     JSON = "application/json"
