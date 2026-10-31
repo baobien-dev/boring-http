@@ -238,9 +238,13 @@ class EndpointSocket(asyncio.DatagramProtocol):
     @classmethod
     async def open(cls, sock: socket.socket, sink: DatagramSink) -> Self:
         loop = asyncio.get_running_loop()
-        transport, protocol = await loop.create_datagram_endpoint(lambda: cls(sink), sock=sock)
-        protocol._transport = transport  # noqa: SLF001
+        _, protocol = await loop.create_datagram_endpoint(lambda: cls(sink), sock=sock)
         return protocol
+
+    @override
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        if isinstance(transport, asyncio.DatagramTransport):
+            self._transport = transport
 
     @property
     def backlogged(self) -> bool:
@@ -291,6 +295,7 @@ class QuicClient:
         # set after every flush, so a writer waiting for its stream to drain looks again
         self._progress = asyncio.Event()
         self._closed = False
+        self._closing_locally = False
         self.incoming: asyncio.Queue[int] = asyncio.Queue()
         self.datagrams: asyncio.Queue[bytes] = asyncio.Queue()
 
@@ -448,6 +453,7 @@ class QuicClient:
 
     async def close(self, error: int = 0, reason: str = "") -> None:
         if not self._terminated.done():
+            self._closing_locally = True
             self._connection.close(error, reason)
             self._flush()
             self._dispatch()
@@ -574,7 +580,9 @@ class QuicClient:
                     pass
 
     def _fail(self, error: BaseException) -> None:
-        self.logger.warning("%s version=h3 error=%s", Event.CONNECTION_FAILED, error)
+        # a close this side asked for ends the streams the same way, but is nothing to warn about
+        if not self._closing_locally:
+            self.logger.warning("%s version=h3 error=%s", Event.CONNECTION_FAILED, error)
         for future in (self._ready, self._handshake):
             if not future.done():
                 future.set_exception(error)

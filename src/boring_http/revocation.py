@@ -59,4 +59,4 @@ class Revocations:
     def _unavailable(self, reason: str) -> None:
         if self._policy is Revocation.STRICT:
             raise RevocationError(reason)
-        self.logger.warning("revocation.unavailable %s", reason)
+        self.logger.info("revocation.unavailable %s", reason)
