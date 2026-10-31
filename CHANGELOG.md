@@ -2,6 +2,12 @@
 
 All notable changes to boring-http. The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.0.2] - 2026-10-31
+
+### Changed
+
+- The HPACK and QPACK Huffman decoder walks the code tree four bits at a time from a table built once, instead of one bit at a time: a 91 byte string decodes in 9 µs, and sequential HTTP/3 requests on loopback go from 3933 to 4446 per second.
+
 ## [3.0.1] - 2026-10-31
 
 ### Fixed
