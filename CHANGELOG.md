@@ -2,6 +2,15 @@
 
 All notable changes to boring-http. The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- `resolver=` on `Client` chooses who turns a name into addresses. `DnsResolver(("1.1.1.1", "8.8.8.8"))` asks those servers over UDP, asks again over TCP when an answer came back truncated, asks A and AAAA at once and keeps the answers for their TTL; `timeout=` bounds each attempt and `attempts=` their number. `DohResolver("https://cloudflare-dns.com/dns-query", client=...)` asks over HTTPS with the `Client` given, so on HTTP/2 or HTTP/3. `SystemResolver()` asks the operating system and is the default. A `resolve=` pin wins over any resolver.
+- A connection tries every address the name resolved to, IPv6 first, and moves to the next when one fails at the socket or in QUIC. `response.trace` starts with a `resolve` span and the logger reports a `resolved` line per connection.
+- `ResolveError`, a `ConnectError`, names a name that did not resolve.
+- `boring_http.dns` has the DNS message as typed values: `Message`, `Header`, `Question`, `Record`, `RecordType`, `ResponseCode` and `Flag`, read and written by structure with name compression followed on read.
+
 ## [3.0.2] - 2026-10-31
 
 ### Changed

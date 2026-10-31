@@ -220,6 +220,38 @@ asyncio.run(main())
 
 `http://`, `https://`, `socks4://`, `socks4a://`, `socks5://` and `socks5h://`, with credentials in the URL or as a `Proxy` from `ssl2`. HTTP and SOCKS proxies carry HTTP/1.1 and HTTP/2; SOCKS5 also carries HTTP/3. `proxy=None` on a request goes direct.
 
+## Resolvers
+
+```python
+import asyncio
+
+from boring_http import Client, DnsResolver, DohResolver, Http2Profile
+from ssl2 import AkamaiFingerprint
+
+http2 = Http2Profile(AkamaiFingerprint.parse("1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"))
+
+
+async def main() -> None:
+    resolver = DnsResolver(("1.1.1.1", "8.8.8.8"))
+    addresses = await resolver.resolve("pingly.us.kg", 443)
+    print(addresses == await resolver.resolve("pingly.us.kg", 443))  # True, the second answer came from the cache
+    async with Client(http2=http2, resolver=resolver, trace=True) as client:
+        response = await client.get("https://pingly.us.kg/api/all")
+        print(response.status, response.connection.remote_address[0] in {host for host, _ in addresses}, response.trace.spans[0].name)  # 200 True resolve
+
+    async with Client(http2=http2) as carrier:
+        doh = DohResolver("https://cloudflare-dns.com/dns-query", client=carrier)
+        print(await doh.resolve("pingly.us.kg", 443) == addresses)  # True, the same answer over HTTPS
+        async with Client(http2=http2, resolver=doh) as client:
+            response = await client.get("https://pingly.us.kg/api/all")
+            print(response.status, response.version)  # 200 h2
+
+
+asyncio.run(main())
+```
+
+The default `SystemResolver()` asks the operating system. `DnsResolver` asks the servers given over UDP, and again over TCP when an answer came back truncated. It asks A and AAAA at once and keeps every answer for its TTL in a `DnsCache`, which `cache=` shares between resolvers; `timeout=` bounds each attempt and `attempts=` their number, each attempt asking the next server. `DohResolver` sends the same queries as the body of a POST to a DNS over HTTPS server, through the `Client` given, so they ride its HTTP/2 or HTTP/3 connection. A connection tries the addresses in the order the resolver gives them, IPv6 first, and moves to the next when one fails. `resolve=` pins win over any resolver, and a name that does not resolve raises `ResolveError`.
+
 ## Fingerprints
 
 ```python
