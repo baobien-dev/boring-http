@@ -31,14 +31,23 @@ dev = [
 ssl2 = { path = "../ssl2", editable = true }
 boring-ssl2 = { path = "../boring-ssl2", editable = true }
 
+[tool.ruff]
+line-length = 120
+
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
+    "C901",    # the size of a function is a reading matter, not a count
     "COM812",  # the formatter places trailing commas
     "CPY",     # no copyright headers
     "D",       # no docstrings
     "E501",    # the formatter wraps lines
     "EM",      # a message is written in the raise
+    "PLR0911", # returns, branches, statements and arguments are not counted either
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR0917",
     "TC",      # imports stay at the top, not under TYPE_CHECKING
     "TRY003",  # a message is written in the raise
 ]
