@@ -1,6 +1,6 @@
 [project]
 name = "boring-http"
-version = "0.1.0"
+version = "3.0.0"
 description = "Asyncio HTTP client on BoringSSL: HTTP/1.1, HTTP/2 and HTTP/3 over QUIC, WebSocket on all three, HTTP and SOCKS proxies, headers in your order"
 readme = "README.md"
 license = "Apache-2.0"
@@ -10,8 +10,8 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
-    "boring-ssl2",
-    "ssl2",
+    "boring-ssl2>=2.0,<3",
+    "ssl2>=3.0,<4",
 ]
 
 [project.urls]
