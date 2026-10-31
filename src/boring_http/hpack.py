@@ -95,6 +95,10 @@ class BlockReader:
     def remaining(self) -> int:
         return len(self._data) - self._position
 
+    @property
+    def position(self) -> int:
+        return self._position
+
     def peek(self) -> int:
         if self._position >= len(self._data):
             raise ProtocolError("the HPACK block ends inside a field")
