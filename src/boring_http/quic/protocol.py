@@ -159,7 +159,8 @@ class ReadinessSocket:
         landing = self._landing
         for _ in range(Size.READ_BURST):
             try:
-                if self._offload:
+                # the platform check is for the type checker: these calls exist on Linux, where offload is turned on
+                if self._offload and sys.platform == "linux":
                     size, ancillary, _, _ = self._socket.recvmsg_into([landing], socket.CMSG_SPACE(Size.SEGMENT_FIELD))
                     segment = self._segment(ancillary, size)
                 else:
@@ -197,7 +198,7 @@ class ReadinessSocket:
                 while count < len(backlog) and len(backlog[count]) == len(backlog[0]):
                     count += 1
             try:
-                if count > 1:
+                if count > 1 and sys.platform == "linux":
                     segment = len(backlog[0]).to_bytes(Size.SEGMENT_FIELD, sys.byteorder)
                     self._socket.sendmsg(
                         [b"".join(backlog[index] for index in range(count))],
