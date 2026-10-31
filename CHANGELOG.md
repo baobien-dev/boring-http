@@ -2,6 +2,18 @@
 
 All notable changes to boring-http. The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.0.1] - 2026-10-31
+
+### Fixed
+
+- A response closed before its body was read left its HTTP/1.1 connection neither idle nor closed, so the pool never gave the slot back, and on HTTP/2 and HTTP/3 left the stream open. The body now runs to its first step before the response is handed out, so closing it reaches the cleanup.
+- HTTP/2: a header block for a stream this side had already reset is still decoded, so the HPACK table stays in step with the server (RFC 9113 section 4.3); padding counts against flow control (section 6.9.1); a write waiting for window leaves no task behind when it is cancelled; a SETTINGS that takes a stream's window below zero no longer spins the event loop; END_STREAM on a HEADERS frame whose block continues in a CONTINUATION ends the stream.
+- Content decoding: a gzip body of several members and a zstd body of several frames decode whole, a deflate body without the zlib wrapper decodes, and a compressed body cut short raises `ProtocolError` instead of passing as complete.
+
+### Changed
+
+- The pool takes an idle connection without its lock, and a connection reads its addresses and handshake once instead of on every request.
+
 ## [3.0.0] - 2026-10-31
 
 The client was written again from the ground up. What a program sees:
