@@ -27,6 +27,11 @@ class Reader:
     def remaining(self) -> int:
         return self._end - self.position
 
+    def peek(self) -> int:
+        if self.position >= self._end:
+            raise ProtocolError("the packet ends inside a field")
+        return self._data[self.position]
+
     def byte(self) -> int:
         if self.position >= self._end:
             raise ProtocolError("the packet ends inside a field")
