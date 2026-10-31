@@ -65,6 +65,7 @@ class Http1Connection:
         self._absolute_form = absolute_form
         self._proxy_authorization = proxy_authorization
         self._keep_alive = True
+        self._info: ConnectionInfo | None = None
         self.idle = True
         self.closed = False
         self.reused = False
@@ -81,12 +82,15 @@ class Http1Connection:
 
     @property
     def info(self) -> ConnectionInfo:
-        transport = self._transport
-        return ConnectionInfo.of(
-            transport.getsockname(),
-            transport.getpeername(),
-            transport.buffer if isinstance(transport, TLSStream) else None,
-        )
+        # the addresses and the handshake do not change for the life of a connection, so this is read once
+        if self._info is None:
+            transport = self._transport
+            self._info = ConnectionInfo.of(
+                transport.getsockname(),
+                transport.getpeername(),
+                transport.buffer if isinstance(transport, TLSStream) else None,
+            )
+        return self._info
 
     def take(self) -> None:
         self.idle = False
@@ -129,13 +133,15 @@ class Http1Connection:
             HTTPVersion.HTTP_1,
             monotonic() - started,
         )
+        raw = self._body(framing, trailers, deadline, trace)
+        await anext(raw)
         return Response(
             status=status,
             reason=reason,
             version=HTTPVersion.HTTP_1,
             headers=response_headers,
             request=request,
-            raw=self._body(framing, trailers, deadline, trace),
+            raw=raw,
             trailers=trailers,
             library=self._library,
             decode=decode,
@@ -214,6 +220,9 @@ class Http1Connection:
         received = 0
         try:
             with Trace.timing(trace, Step.BODY):
+                # the connection runs the body to here before handing it out, so a response closed before it is
+                # read still reaches the cleanup below
+                yield b""
                 async for chunk in self._pieces(framing, trailers, deadline):
                     received += len(chunk)
                     yield chunk

@@ -169,6 +169,7 @@ class Http3Connection:
         self._pending: set[int] = set()
         self._readers: set[asyncio.Task[None]] = set()
         self._settings_received: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._info: ConnectionInfo | None = None
         self.closed = False
         self.reused = False
         self.connect_time = 0.0
@@ -186,7 +187,12 @@ class Http3Connection:
 
     @property
     def info(self) -> ConnectionInfo:
-        return ConnectionInfo.of(self._quic.getsockname(), self._quic.getpeername(), self._quic.connection.buffer)
+        # the addresses and the handshake do not change for the life of a connection, so this is read once
+        if self._info is None:
+            self._info = ConnectionInfo.of(
+                self._quic.getsockname(), self._quic.getpeername(), self._quic.connection.buffer
+            )
+        return self._info
 
     @property
     def connect_protocol(self) -> bool:
@@ -269,13 +275,15 @@ class Http3Connection:
             stream_id,
             monotonic() - started,
         )
+        raw = self._body(frames, stream_id, trailers, trace)
+        await anext(raw)
         return Response(
             status=status,
             reason="",
             version=HTTPVersion.HTTP_3,
             headers=headers,
             request=request,
-            raw=self._body(frames, stream_id, trailers, trace),
+            raw=raw,
             trailers=trailers,
             library=self._library,
             decode=decode,
@@ -384,6 +392,9 @@ class Http3Connection:
         received = 0
         try:
             with Trace.timing(trace, Step.BODY):
+                # the connection runs the body to here before handing it out, so a response closed before it is
+                # read still reaches the cleanup below
+                yield b""
                 async for payload in self._data_frames(frames, stream_id, trailers):
                     received += len(payload)
                     yield payload

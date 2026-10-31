@@ -210,6 +210,9 @@ class Response:
             decoded = decoder.decode(chunk)
             if decoded:
                 yield decoded
+        tail = decoder.finish()
+        if tail:
+            yield tail
 
     async def close(self) -> None:
         await self._raw.aclose()

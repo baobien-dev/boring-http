@@ -142,6 +142,8 @@ class Http2Connection:
             profile.setting(Http2SettingIdentifier.MAX_HEADER_LIST_SIZE, Default.HEADER_LIST_SIZE),
         )
         self._streams: dict[int, Http2Stream] = {}
+        # header blocks of streams this side no longer has, kept until END_HEADERS so the HPACK table follows them
+        self._orphan_blocks: dict[int, bytearray] = {}
         self._next_stream = 1
         self._write_lock = asyncio.Lock()
         self._buffer = bytearray()
@@ -156,6 +158,7 @@ class Http2Connection:
         self._goaway: int | None = None
         self._reader: asyncio.Task[None] | None = None
         self._settings_received: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._info: ConnectionInfo | None = None
         self.connect_protocol = False
         self.closed = False
         self.reused = False
@@ -172,12 +175,15 @@ class Http2Connection:
 
     @property
     def info(self) -> ConnectionInfo:
-        transport = self._transport
-        return ConnectionInfo.of(
-            transport.getsockname(),
-            transport.getpeername(),
-            transport.buffer if isinstance(transport, TLSStream) else None,
-        )
+        # the addresses and the handshake do not change for the life of a connection, so this is read once
+        if self._info is None:
+            transport = self._transport
+            self._info = ConnectionInfo.of(
+                transport.getsockname(),
+                transport.getpeername(),
+                transport.buffer if isinstance(transport, TLSStream) else None,
+            )
+        return self._info
 
     def take(self) -> None:
         pass
@@ -234,13 +240,15 @@ class Http2Connection:
             stream.identifier,
             monotonic() - started,
         )
+        raw = self._body(stream, deadline, trace)
+        await anext(raw)
         return Response(
             status=status,
             reason="",
             version=HTTPVersion.HTTP_2,
             headers=headers,
             request=request,
-            raw=self._body(stream, deadline, trace),
+            raw=raw,
             trailers=stream.trailers,
             library=self._library,
             decode=decode,
@@ -268,13 +276,16 @@ class Http2Connection:
             if view and allowance == 0:
                 stream.window_changed.clear()
                 self._window_changed.clear()
-                await asyncio.wait(
-                    {
-                        asyncio.ensure_future(stream.window_changed.wait()),
-                        asyncio.ensure_future(self._window_changed.wait()),
-                    },
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
+                waiters = {
+                    asyncio.ensure_future(stream.window_changed.wait()),
+                    asyncio.ensure_future(self._window_changed.wait()),
+                }
+                try:
+                    await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    # the wait that did not finish would otherwise stay behind as a pending task
+                    for waiter in waiters:
+                        waiter.cancel()
                 continue
             batch = bytearray()
             sent = 0
@@ -377,6 +388,9 @@ class Http2Connection:
         received = 0
         try:
             with Trace.timing(trace, Step.BODY):
+                # the connection runs the body to here before handing it out, so a response closed before it is
+                # read still reaches the cleanup below
+                yield b""
                 while data := await self.receive(stream, deadline):
                     received += len(data)
                     yield data
@@ -478,17 +492,21 @@ class Http2Connection:
         return b""
 
     def _data(self, flags: int, identifier: int, payload: bytes) -> bytes:
+        # RFC 9113 section 6.9.1: the whole frame payload counts against flow control, padding included
+        size = len(payload)
         if flags & Flag.PADDED:
-            payload = payload[1 : len(payload) - payload[0]]
+            payload = payload[1 : size - payload[0]]
         stream = self._streams.get(identifier)
         if stream is not None:
             if payload:
                 stream.chunks.append(payload)
+            # the padding is consumed on arrival; the data is credited as the application takes it
+            stream.consumed += size - len(payload)
             if flags & Flag.END_STREAM:
                 stream.finished = True
             stream.wake()
         # the connection window opens on arrival, so one stream that is not read leaves the others their share
-        self._connection_received += len(payload)
+        self._connection_received += size
         if self._connection_received > self._connection_window // 2:
             update = self._frame(FrameType.WINDOW_UPDATE, 0, 0, struct.pack("!I", self._connection_received))
             self._connection_received = 0
@@ -496,14 +514,23 @@ class Http2Connection:
         return b""
 
     def _headers(self, kind: FrameType, flags: int, identifier: int, payload: bytes) -> None:
-        stream = self._streams.get(identifier)
-        if stream is None:
-            return
         if kind is FrameType.HEADERS:
             if flags & Flag.PADDED:
                 payload = payload[1 : len(payload) - payload[0]]
             if flags & Flag.PRIORITY:
                 payload = payload[Size.PRIORITY :]
+        stream = self._streams.get(identifier)
+        if stream is None:
+            # RFC 9113 section 4.3: a block for a stream this side has forgotten still moves the HPACK table
+            if kind is FrameType.HEADERS:
+                self._orphan_blocks[identifier] = bytearray()
+            block = self._orphan_blocks.setdefault(identifier, bytearray())
+            block += payload
+            if flags & Flag.END_HEADERS:
+                del self._orphan_blocks[identifier]
+                self._decoder.decode(bytes(block))
+            return
+        if kind is FrameType.HEADERS:
             stream.block = bytearray()
         stream.block += payload
         if not flags & Flag.END_HEADERS:
