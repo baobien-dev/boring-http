@@ -43,7 +43,7 @@ dev = [
 
 [[package]]
 name = "boring-ssl2"
-version = "2.0.2"
+version = "2.0.3"
 source = { editable = "../boring-ssl2" }
 dependencies = [
     { name = "ssl2" },
