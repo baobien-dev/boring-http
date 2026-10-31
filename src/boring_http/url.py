@@ -68,21 +68,23 @@ class Url(Value):
     @staticmethod
     @lru_cache(maxsize=CacheSize.PARSED_URLS)
     def parse(text: str) -> Url:
-        parts = urlsplit(text)
+        # a bracketed host that is no address, a port that is no number and a name IDNA cannot encode all end here
+        try:
+            parts = urlsplit(text)
+            host = (parts.hostname or "").encode("idna").decode("ascii")
+            port = parts.port
+        except ValueError as error:
+            raise ParseError(f"{text!r} is not a URL: {error}") from None
         try:
             scheme = Scheme(parts.scheme.lower())
         except ValueError:
             raise ParseError(f"{parts.scheme!r} is not a scheme this client speaks, in {text!r}") from None
-        if not parts.hostname:
+        if not host:
             raise ParseError(f"the URL {text!r} names no host")
-        try:
-            port = parts.port
-        except ValueError:
-            raise ParseError(f"the URL {text!r} has a port that is not a number") from None
         return Url(
             text,
             scheme,
-            parts.hostname.encode("idna").decode("ascii"),
+            host,
             port if port is not None else scheme.default_port,
             quote(parts.path, Safe.PATH),
             quote(parts.query, Safe.QUERY),

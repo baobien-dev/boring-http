@@ -8,6 +8,7 @@ from time import monotonic
 
 from boring_ssl2 import Library
 from ssl2.asynchronous import AsyncTransport, TLSStream
+from ssl2.errors import ConfigurationError
 from ssl2.fingerprint import Http2Priority, PseudoHeader
 from ssl2.registry import Http2SettingIdentifier
 from ssl2.tracing import Trace
@@ -511,7 +512,7 @@ class Http2Connection:
         pseudo = {name: value for name, value in decoded if name.startswith(":")}
         try:
             regular = Headers([(name, value) for name, value in decoded if not name.startswith(":")])
-        except ValueError as error:
+        except ConfigurationError as error:
             stream.fail(ProtocolError(f"malformed header from the server: {error}"))
             return
         if not stream.headers.done():

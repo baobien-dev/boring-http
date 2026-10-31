@@ -8,6 +8,7 @@ from time import monotonic
 
 from boring_ssl2 import Library
 from ssl2.asynchronous import AsyncTransport
+from ssl2.errors import ConfigurationError
 from ssl2.fingerprint import PseudoHeader
 from ssl2.tracing import Trace
 
@@ -420,7 +421,7 @@ class Http3Connection:
         decoded = [(name.decode("latin-1"), value.decode("latin-1")) for name, value in fields]
         try:
             Headers([(name, value) for name, value in decoded if not name.startswith(":")])
-        except ValueError as error:
+        except ConfigurationError as error:
             raise ProtocolError(f"malformed header from the server: {error}") from None
         return decoded
 

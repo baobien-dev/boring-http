@@ -7,6 +7,7 @@ from time import monotonic
 
 from boring_ssl2 import Library
 from ssl2.asynchronous import AsyncTransport, TLSStream
+from ssl2.errors import ConfigurationError
 from ssl2.tracing import Trace
 from ssl2.value import Value
 
@@ -180,8 +181,8 @@ class Http1Connection:
                     raise ProtocolError(f"malformed header line {line!r}")
                 try:
                     headers.add(name.strip(), value)
-                except ValueError as error:
-                    raise ProtocolError(str(error)) from None
+                except ConfigurationError as error:
+                    raise ProtocolError(f"malformed header from the server: {error}") from None
             status = int(code)
             if HTTPStatus.CONTINUE <= status < HTTPStatus.OK and status != HTTPStatus.SWITCHING_PROTOCOLS:
                 continue
@@ -268,8 +269,8 @@ class Http1Connection:
                 raise ProtocolError(f"malformed trailer line {line!r}")
             try:
                 trailers.add(name.strip(), value)
-            except ValueError as error:
-                raise ProtocolError(str(error)) from None
+            except ConfigurationError as error:
+                raise ProtocolError(f"malformed trailer from the server: {error}") from None
 
     async def _read_some(self, limit: int, deadline: Deadline) -> bytes:
         if not self._buffer:
